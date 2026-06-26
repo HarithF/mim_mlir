@@ -8,10 +8,10 @@
 
 The **mlir** plugin emits [MLIR](https://mlir.llvm.org/) from a partially optimized
 **MimIR** world, instead of going through MimIR's native LLVM backend (`ll`). It lowers
-MimIR's functional, CPS-style IR — including tensor `map_reduce`/`broadcast` operations
-and `affine.For` loops — into the `func`, `arith`, `math`, `scf`, `linalg`, and `tensor`
+MimIR's functional, CPS-style IR, mainly targeting tensor `map_reduce`/`broadcast` operations
+and `affine.For` loops, into the `func`, `arith`, `math`, `scf`, `linalg`, and `tensor`
 MLIR dialects, so MimIR programs can flow into the MLIR ecosystem (further dialect
-lowering, MLIR's own optimizer, GPU/accelerator backends, etc.) instead of straight to
+lowering, bufferization, MLIR's own optimizer, GPU/accelerator backends, etc.) instead of straight to
 machine code.
 
 Because this is a third-party plugin, it does not run as part of MimIR's default
