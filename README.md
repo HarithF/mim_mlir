@@ -1,18 +1,10 @@
 <p align="center">
-  <h2 align="center">mlir</h2>
+  <h2 align="center">MLIR Mim Emitter</h2>
 </p>
 
 <p align="center">
   <b>MLIR Code Generation</b> for <b>MimIR</b>
 </p>
-
-<div align="center">
-
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![GitHub Issues or Pull Requests](https://img.shields.io/github/issues/<your-gh-user>/mlir)](https://github.com/<your-gh-user>/mlir/issues)
-[![GitHub Issues or Pull Requests](https://img.shields.io/github/issues-pr/<your-gh-user>/mlir)](https://github.com/<your-gh-user>/mlir/pulls)
-
-</div>
 
 The **mlir** plugin emits [MLIR](https://mlir.llvm.org/) from a partially optimized
 **MimIR** world, instead of going through MimIR's native LLVM backend (`ll`). It lowers
