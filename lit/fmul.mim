@@ -1,0 +1,7 @@
+plugin core;
+plugin mem;
+plugin math;
+
+fun extern fmul(a: %math.F32, b: %math.F32): %math.F32 =
+    let r = %math.arith.mul 0 (a, b);
+    return r;

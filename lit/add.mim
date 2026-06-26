@@ -1,0 +1,6 @@
+plugin core;
+plugin mem;
+
+fun extern add(a b: I32): I32 = 
+    let r = %core.wrap.add 0 (a, b);
+    return r;
