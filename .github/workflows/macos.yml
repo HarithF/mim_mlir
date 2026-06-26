@@ -1,0 +1,66 @@
+name: macos
+
+on:
+  push:
+  pull_request:
+    branches: [master]
+
+jobs:
+  build-and-test:
+    name: Build and test ${{matrix.build-type}} mode
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        build-type: [Debug, Release]
+
+    steps:
+      - name: Clone recursively
+        uses: actions/checkout@v4
+        with:
+          repository: mimir/mimir
+          path: mimir
+          submodules: recursive
+
+      - name: Clone mlir plugin
+        uses: actions/checkout@v4
+        with:
+          path: mimir/extra/mlir
+
+      - name: Set up Python
+        run: |
+          python3 -m venv .venv
+          source .venv/bin/activate
+          pip install lit psutil
+
+      - name: Install LLVM and add to PATH
+        run: |
+          brew install llvm
+          LLVM_PREFIX=$(brew --prefix llvm)
+          echo "LLVM_PREFIX=${LLVM_PREFIX}" >> $GITHUB_ENV
+          echo "${LLVM_PREFIX}/bin" >> $GITHUB_PATH
+
+      - name: Setup ccache
+        uses: Chocobo1/setup-ccache-action@v1
+        with:
+          ccache_options: max_size=500M
+          override_cache_key: mac-latest-ccache-${{matrix.build-type}}
+
+      - name: Configure
+        run: |
+          CC="${LLVM_PREFIX}/bin/clang" CXX="${LLVM_PREFIX}/bin/clang++"  \
+          cmake -B mimir/build                            \
+                -DCMAKE_BUILD_TYPE=${{matrix.build-type}}                 \
+                -DBUILD_TESTING=ON                                        \
+                -DMIM_BUILD_EXAMPLES=ON                                   \
+                -DMIM_FILECHECK=${LLVM_PREFIX}/bin/FileCheck              \
+                -DMIM_LIT_TIMEOUT=300                                     \
+                -DPython3_EXECUTABLE=mimir/.venv/bin/python3
+
+      - name: Build
+        run: cmake --build mimir/build -v
+
+      - name: Test
+        working-directory: mimir/build
+        run: |
+          export PATH=mimir/bin:$PATH
+          cmake --build mimir/build -v --target test-all

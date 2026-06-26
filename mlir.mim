@@ -1,0 +1,15 @@
+/// # The mlir Plugin {#mlir}
+///
+/// @see mim::plug::mlir
+///
+/// A minimal mlir plugin
+///
+/// [TOC]
+///
+/// ## Operations
+///
+/// ### %%mlir.const_idx
+///
+/// The 42 constant, evaluated using a normalizer
+///
+axm %mlir.const_idx: [n: Nat] → Idx n, normalize_const;
