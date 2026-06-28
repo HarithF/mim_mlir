@@ -727,9 +727,14 @@ MLIRValue MLIREmitter::emit_def(const Def* def, MLIRBlock& into) {
         // mem ops — no MLIR value
         if (Axm::isa<plug::mem::M>(def->type())) return {};
 
-        if (Axm::isa<plug::tensor::map_reduce>(app)) {
+        if (Axm::isa<plug::tensor::map_reduce>(app) || Axm::isa<plug::tensor::map_reduce_ds>(app)) {
             emit_linalg_generic(app, into);
             return values_[def];
+        }
+
+        if (Axm::isa<plug::tensor::map_reduce_aff>(app)) {
+            assert(false && "map_reduce_aff not yet supported");
+            return {};
         }
 
         if (auto bc = Axm::isa<plug::tensor::broadcast>(app)) {

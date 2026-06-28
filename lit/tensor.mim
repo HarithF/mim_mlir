@@ -4,7 +4,7 @@ plugin tensor;
 let f32 = %math.f32;
 let F32 = %math.F32;
 
-let R: Ring = (F32, 0: F32, %math.arith.add @f32 0, %math.arith.mul @f32 0);
+let R: %tensor.Ring = (F32, 0: F32, %math.arith.add @f32 0, %math.arith.mul @f32 0);
 
 lam F32_add {r: Nat, s: «r; Nat»} [is: [«s; F32», «s; F32»]] : «s; F32» = %tensor.binary (%math.arith.add @f32 0) is;
 lam F32_sub {r: Nat, s: «r; Nat»} [is: [«s; F32», «s; F32»]] : «s; F32» = %tensor.binary (%math.arith.sub @f32 0) is;
@@ -32,17 +32,10 @@ con extern main_hlo [arg0: «784; «1024; F32»», arg1: «1024; F32», arg2: «
   let v_17 = F32_add @(2, (128, 10)) (v_14, v_16);
   let v_cst_0 = 0xFEC00000 : F32;
 
-  let v_18 = %tensor.map_reduce_pure @1 (128,) @(F32, 2, (128, 10))
+  let v_18 = %tensor.map_reduce_ds @1 (128,) @(F32, 2, (128, 10))
              ((%math.extrema.ieee754max @f32 0), v_cst_0)
              ((0, 1),)
              (v_17,);
 
   return v_18;
-
-//let v_19 = %tensor.map_reduce_pure @1 (1,) @(F32, 1, (128,))
-//             ((%math.extrema.ieee754max @f32 0), v_cst_0)
-//             ((0,),)
-//             (v_18,);
-//let v_scalar = %tensor.get @(F32, 1, 1) (v_19, 0_1);
-//return v_scalar;
 
