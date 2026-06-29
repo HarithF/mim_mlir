@@ -1,6 +1,12 @@
+// RUN: rm -rf %t && mkdir -p %t && cd %t && %mim -p mlir %s && %FileCheck %s < %{s:stem}.mlir
 plugin core;
 plugin mem;
 
-fun extern add(a b: I32): I32 = 
+fun extern add(a b: I32): I32 =
     let r = %core.wrap.add 0 (a, b);
     return r;
+
+// CHECK: module
+// CHECK: func.func public @add(%a: i32, %b: i32) -> i32
+// CHECK: arith.addi
+// CHECK: func.return

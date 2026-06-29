@@ -1,3 +1,4 @@
+// RUN: rm -rf %t && mkdir -p %t && cd %t && %mim -p mlir %s && %FileCheck %s < %{s:stem}.mlir
 plugin tensor;
 plugin core;
 plugin math;
@@ -5,7 +6,6 @@ plugin math;
 let f32 = %math.f32;
 let F32 = %math.F32;
 let R: %tensor.Ring = (F32, 0: F32, %math.arith.add @f32 0, %math.arith.mul @f32 0);
-
 
 let A: «2; «2; F32»» = ((1.0: F32, 2.0: F32), (3.0: F32, 4.0: F32));
 let B: «2; «2; F32»» = ((1.0: F32, 0.0: F32), (0.0: F32, 1.0: F32));
@@ -15,4 +15,16 @@ let result = %tensor.product_2d R (A, B);
 fun extern main (): «2; «2; F32»» =
     return result;
 
-
+// CHECK: module
+// CHECK: func.func public @main() -> tensor<2x2xf32>
+// CHECK: arith.constant dense<{{.*}}> : tensor<2x2xf32>
+// CHECK: tensor.empty() : tensor<2x2xf32>
+// CHECK: linalg.generic
+// CHECK-SAME: affine_map<(d0, d1, d2) -> (d0, d2)>
+// CHECK-SAME: affine_map<(d0, d1, d2) -> (d2, d1)>
+// CHECK-SAME: affine_map<(d0, d1, d2) -> (d0, d1)>
+// CHECK-SAME: iterator_types = ["parallel", "parallel", "reduction"]
+// CHECK: arith.mulf
+// CHECK: arith.addf
+// CHECK: linalg.yield
+// CHECK: func.return
