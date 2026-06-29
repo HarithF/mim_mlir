@@ -33,7 +33,7 @@ lam extern _default_compile (): %compile.Phase =
          %compile.cond_phase "tensor" (
              %compile.phases ff (
                  %compile.named_phase "%tensor.lower_tensor",
-             ///    %compile.named_phase "%tensor.fuse_tensor",
+                 %compile.named_phase "%tensor.fuse_tensor",
         //         %compile.named_phase "%tensor.lower_map_reduce",
              )
          ),

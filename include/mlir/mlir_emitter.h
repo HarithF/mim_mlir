@@ -1,4 +1,5 @@
 #pragma once
+#include <optional>
 #include <ostream>
 #include <set>
 #include <string>
@@ -31,22 +32,15 @@ public:
     void run();
 
 private:
-    // top-level
+    // ===== mlir_emitter_core.cpp =====
     void emit_func(Lam* lam, MLIRBlock& into);
-
-    // -----region builders-----
-    void emit_affine_for(const App* app, MLIRBlock& into);
-
-    void emit_for_body(Lam* body_lam, MLIRBlock& body_bb);
-
-    void emit_body(Lam* lam, MLIRBlock& into);
 
     // ------ leaf def emitter ---------
     MLIRValue emit_def(const Def* def, MLIRBlock& into);
     MLIRValue get_or_emit(const Def* def, MLIRBlock& into);
 
-    void emit_linalg_generic(const App* mr_app, MLIRBlock& into);
-    void emit_linalg_body(Lam* body_lam, MLIRBlock& body_bb);
+    // Scalar arithmetic dispatch
+    std::optional<MLIRValue> try_emit_arith(const App* app, MLIRBlock& into);
 
     //  -------arg seeding -----------
     void seed_dom_op(const Def* op, std::vector<MLIRValue>& args);
@@ -56,6 +50,21 @@ private:
     std::string fresh_name(const Def* def);
     std::string fresh_name(std::string prefix);
     bool is_return_callee(const Def* c, const Def* ret_var);
+
+    // ===== mlir_emitter_control_flow.cpp =====
+    void emit_body(Lam* lam, MLIRBlock& into);
+    void emit_affine_for(const App* app, MLIRBlock& into);
+    void emit_for_body(Lam* body_lam, MLIRBlock& body_bb);
+    std::optional<std::vector<MLIRValue>> try_emit_cond_branch(const App* app, MLIRBlock& into);
+    std::optional<std::tuple<MLIRValue, Lam*, Lam*>> detect_cond_branch(const App* app, MLIRBlock& into);
+    std::vector<MLIRValue> emit_scf_if(MLIRValue cond, Lam* then_lam, Lam* else_lam, MLIRBlock& into);
+    std::vector<MLIRValue> emit_branch_values(Lam* lam, MLIRBlock& into);
+
+    // ===== mlir_emitter_linalg.cpp =====
+
+    std::optional<MLIRValue> try_emit_tensor_op(const App* app, MLIRBlock& into);
+    void emit_linalg_generic(const App* mr_app, MLIRBlock& into);
+    void emit_linalg_body(Lam* body_lam, MLIRBlock& body_bb);
 
     World& world_;
     std::ostream& os_;

@@ -93,4 +93,42 @@ private:
     MLIRRegion body_;
 };
 
+class SCFIfOp : public MLIROp {
+public:
+    SCFIfOp(std::vector<MLIRValue> results, MLIRValue cond, MLIRBlock then_block, MLIRBlock else_block)
+        : MLIROp(std::move(results), {std::move(cond)})
+        , then_block_(std::move(then_block))
+        , else_block_(std::move(else_block)) {}
+
+    void print(Printer& p) const override {
+        std::string lhs;
+        for (auto& r : results_)
+            lhs += (lhs.empty() ? "" : ", ") + r.name;
+        if (!lhs.empty()) lhs += " = ";
+
+        std::string ret_types;
+        for (auto& r : results_)
+            ret_types += (ret_types.empty() ? "" : ", ") + print_type(r.type);
+
+        if (ret_types.empty())
+            p.line("{}scf.if {} {{", lhs, operands_[0].name);
+        else
+            p.line("{}scf.if {} -> ({}) {{", lhs, operands_[0].name, ret_types);
+
+        p.indent();
+        for (auto& op : then_block_.ops)
+            op->print(p);
+        p.dedent();
+        p.line("}} else {{");
+        p.indent();
+        for (auto& op : else_block_.ops)
+            op->print(p);
+        p.dedent();
+        p.line("}}");
+    }
+
+private:
+    MLIRBlock then_block_, else_block_;
+};
+
 } // namespace mim::mlir_be

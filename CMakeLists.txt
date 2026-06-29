@@ -10,7 +10,9 @@ add_mim_plugin(mlir
         src/mlir.cpp
         src/normalizers.cpp
         src/mlir/lam_classifier.cpp
-        src/mlir/mlir_emitter.cpp
+        src/mlir/mlir_emitter_core.cpp
+        src/mlir/mlir_emitter_control_flow.cpp
+        src/mlir/mlir_emitter_linalg.cpp
         src/mlir/printer.cpp
         src/mlir/region_tree.cpp
         src/mlir/type_converter.cpp

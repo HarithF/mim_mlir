@@ -1,3 +1,5 @@
+// RUN: rm -rf %t && mkdir -p %t && cd %t && %mim -p mlir %s && %FileCheck %s < %{s:stem}.mlir
+
 plugin core;
 plugin mem;
 plugin math;
@@ -5,3 +7,8 @@ plugin math;
 fun extern fmul(a: %math.F32, b: %math.F32): %math.F32 =
     let r = %math.arith.mul 0 (a, b);
     return r;
+
+// CHECK: module
+// CHECK: func.func public @fmul(%a: f32, %b: f32) -> f32
+// CHECK: arith.mulf
+// CHECK: func.return

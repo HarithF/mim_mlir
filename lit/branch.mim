@@ -1,0 +1,19 @@
+// RUN: rm -rf %t && mkdir -p %t && cd %t && %mim -p mlir %s && %FileCheck %s < %{s:stem}.mlir
+plugin core;
+plugin mem;
+
+con extern branch_test [mem: %mem.M 0, a: I32, b: I32, return: Cn [%mem.M 0, I32]] =
+    let c = %core.icmp.sl (a, b);
+    (else_b, then_b)#c ()
+    where
+        con then_b () = return (mem, a);
+        con else_b () = return (mem, b);
+    end;
+
+// CHECK: module
+// CHECK: func.func public @branch_test(%a: i32, %b: i32) -> i32
+// CHECK: arith.cmpi slt
+// CHECK: scf.if
+// CHECK: scf.yield %a
+// CHECK: scf.yield %b
+// CHECK: func.return
