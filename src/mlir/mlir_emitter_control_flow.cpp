@@ -163,10 +163,14 @@ void MLIREmitter::emit_for_body(Lam* body_lam, MLIRBlock& body_bb) {
 std::optional<std::tuple<MLIRValue, Lam*, Lam*>> MLIREmitter::detect_cond_branch(const App* app, MLIRBlock& into) {
     auto* ex = app->callee()->isa<Extract>();
     if (!ex) return std::nullopt;
-    auto* tup = ex->tuple()->isa<Tuple>();
-    if (!tup || tup->num_ops() != 2) return std::nullopt;
-    auto* lam_f = tup->op(0)->isa_mut<Lam>();
-    auto* lam_t = tup->op(1)->isa_mut<Lam>();
+
+    auto hit = as_bool_select_tuple(ex);
+    if (!hit) return std::nullopt;
+    auto [false_def, true_def] = *hit;
+
+    auto* lam_f = false_def->isa_mut<Lam>(); // ff = else
+    auto* lam_t = true_def->isa_mut<Lam>();  // tt = then
+
     if (!lam_f || !lam_t) return std::nullopt;
     return std::make_tuple(get_or_emit(ex->index(), into), lam_t, lam_f);
 }

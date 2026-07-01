@@ -3,8 +3,6 @@
 
 #include <format>
 #include <functional>
-#include <map>
-#include <set>
 
 #include <mim/lam.h>
 #include <mim/tuple.h>
@@ -16,8 +14,6 @@
 #include <mim/plug/mem/mem.h>
 #include <mim/plug/tensor/autogen.h>
 #include <mim/plug/tensor/tensor.h>
-
-#include "mim/util/util.h"
 
 #include "mlir/mlir_emitter.h"
 #include "mlir/ops/arith.h"
@@ -209,7 +205,7 @@ MLIRValue MLIREmitter::emit_def(const Def* def, MLIRBlock& into) {
 }
 
 std::optional<MLIRValue> MLIREmitter::try_emit_select(const Extract* ex, MLIRBlock& into) {
-    auto hit = as_bool_select_tuple(ex);
+    auto hit = select_tuple_as_bool(ex);
     if (!hit) return std::nullopt;
     auto [false_def, true_def] = *hit;
 

@@ -1,4 +1,10 @@
 #pragma once
+#include <optional>
+#include <utility>
+
+#include <mim/def.h>
+#include <mim/tuple.h>
+
 #include "mlir/printer.h"
 #include "mlir/region_tree.h"
 
@@ -130,5 +136,11 @@ public:
 private:
     MLIRBlock then_block_, else_block_;
 };
+
+inline std::optional<std::pair<const Def*, const Def*>> select_tuple_as_bool(const Extract* ex) {
+    auto* tup = ex->tuple()->isa<Tuple>();
+    if (!tup || tup->num_ops() != 2) return std::nullopt;
+    return std::make_pair(tup->op(0), tup->op(1)); // (false_val, true_val)
+}
 
 } // namespace mim::mlir_be
