@@ -41,4 +41,13 @@ private:
     Kind kind_;
 };
 
+class MathIsFiniteOp : public MLIROp {
+public:
+    MathIsFiniteOp(MLIRValue result, MLIRValue operand)
+        : MLIROp({std::move(result)}, {std::move(operand)}) {}
+    void print(Printer& p) const override {
+        p.line("{} = math.isfinite {} : {}", results_[0].name, operands_[0].name, print_type(operands_[0].type));
+    }
+};
+
 } // namespace mim::mlir_be
