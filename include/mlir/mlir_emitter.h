@@ -41,22 +41,25 @@ private:
 
     // Scalar arithmetic dispatch
     std::optional<MLIRValue> try_emit_arith(const App* app, MLIRBlock& into);
-
-    //  -------arg seeding -----------
-    void seed_dom_op(const Def* op, std::vector<MLIRValue>& args);
-    void seed_var_tree(const Def* d);
+    std::optional<MLIRValue> try_emit_select(const Extract* ex, MLIRBlock& into);
 
     // ----- helpers  ---------
     std::string fresh_name(const Def* def);
     std::string fresh_name(std::string prefix);
     bool is_return_callee(const Def* c, const Def* ret_var);
+    double lit_to_double(const Lit* lit);
+
+    //  -------arg seeding -----------
+    void seed_dom_op(const Def* op, std::vector<MLIRValue>& args);
+    void seed_var_tree(const Def* d);
 
     // ===== mlir_emitter_control_flow.cpp =====
     void emit_body(Lam* lam, MLIRBlock& into);
     void emit_affine_for(const App* app, MLIRBlock& into);
     void emit_for_body(Lam* body_lam, MLIRBlock& body_bb);
-    std::optional<std::vector<MLIRValue>> try_emit_cond_branch(const App* app, MLIRBlock& into);
+
     std::optional<std::tuple<MLIRValue, Lam*, Lam*>> detect_cond_branch(const App* app, MLIRBlock& into);
+    std::optional<std::vector<MLIRValue>> try_emit_cond_branch(const App* app, MLIRBlock& into);
     std::vector<MLIRValue> emit_scf_if(MLIRValue cond, Lam* then_lam, Lam* else_lam, MLIRBlock& into);
     std::vector<MLIRValue> emit_branch_values(Lam* lam, MLIRBlock& into);
 

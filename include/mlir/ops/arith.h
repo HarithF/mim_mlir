@@ -113,6 +113,17 @@ private:
     Kind kind_;
 };
 
+class SelectOp : public MLIROp {
+public:
+    SelectOp(MLIRValue result, MLIRValue cond, MLIRValue true_val, MLIRValue false_val)
+        : MLIROp({std::move(result)}, {std::move(cond), std::move(true_val), std::move(false_val)}) {}
+
+    void print(Printer& p) const override {
+        p.line("{} = arith.select {}, {}, {} : {}", results_[0].name, operands_[0].name, operands_[1].name,
+               operands_[2].name, print_type(results_[0].type));
+    }
+};
+
 class CmpiOp : public MLIROp {
 public:
     enum class Pred {
@@ -183,6 +194,12 @@ private:
     std::string attr_;
 };
 
+inline std::string format_mlir_float(double v) {
+    if (std::isnan(v)) return "0x7FC00000";
+    if (std::isinf(v)) return v > 0 ? "0x7F800000" : "0xFF800000";
+    return (v == std::floor(v)) ? std::format("{:.1f}", v) : std::format("{}", v);
+}
+
 inline std::string make_dense_attr(const std::vector<double>& vals, const MLIRTensorType& tt) {
     std::vector<size_t> dims;
     for (auto& d : tt.shape)
@@ -196,7 +213,7 @@ inline std::string make_dense_attr(const std::vector<double>& vals, const MLIRTe
                 if (i) s += ", ";
                 // print as integer if whole number, float otherwise
                 double v = vals[flat_idx++];
-                s += (v == std::floor(v)) ? std::format("{:.1f}", v) : std::format("{}", v);
+                s += format_mlir_float(v);
             }
             return s + "]";
         }

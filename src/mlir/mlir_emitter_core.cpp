@@ -20,90 +20,10 @@
 #include "mim/util/util.h"
 
 #include "mlir/mlir_emitter.h"
+#include "mlir/ops/arith.h"
 
 namespace mim::mlir_be {
 
-// ----- Helpers -------
-std::string MLIREmitter::fresh_name(const Def* def) {
-    auto sym = def->sym().str();
-    if (!sym.empty() && sym[0] != '_') return "%" + sym;
-    return std::format("%v{}", name_counter_++);
-}
-std::string MLIREmitter::fresh_name(std::string prefix) { return prefix + std::to_string(name_counter_++); }
-
-bool MLIREmitter::is_return_callee(const Def* c, const Def* ret_var) {
-    if (c == ret_var) return true;
-    if (auto ex = c->isa<Extract>()) return ex->sym().str() == "return";
-    return false;
-}
-
-MLIRValue MLIREmitter::get_or_emit(const Def* def, MLIRBlock& into) {
-    if (auto it = values_.find(def); it != values_.end()) return it->second;
-    auto val     = emit_def(def, into);
-    values_[def] = val;
-    return val;
-}
-
-// Recursively unpack op into individual MLIR argsv
-void MLIREmitter::seed_dom_op(const Def* op, std::vector<MLIRValue>& args) {
-    if (Axm::isa<plug::mem::M>(op->type())) return;
-    if (op->type()->isa<Pi>()) return;
-
-    if (auto sigma = op->type()->isa<Sigma>()) {
-        for (size_t i = 0; i < sigma->num_ops(); ++i)
-            seed_dom_op(op->proj(sigma->num_ops(), i), args);
-        return;
-    }
-    if (auto arr = op->type()->isa<Arr>()) {
-        if (auto n = Lit::isa(arr->arity())) {
-            bool is_arg_tuple  = false;
-            size_t check_limit = std::min(*n, (uint64_t)4);
-            for (size_t i = 0; i < check_limit; ++i) {
-                auto sym = op->proj(*n, i)->sym().str();
-                if (!sym.empty() && sym[0] != '_') {
-                    is_arg_tuple = true;
-                    break;
-                }
-            }
-            if (is_arg_tuple) {
-                for (size_t i = 0; i < *n; ++i)
-                    seed_dom_op(op->proj(*n, i), args);
-                return;
-            }
-        }
-    }
-
-    MLIRValue v{fresh_name(op), types_.convert(op->type())};
-    args.push_back(v);
-    values_[op] = v;
-}
-
-// Recursively walks the var tree and seeds any unseeded leaf by sym match.
-void MLIREmitter::seed_var_tree(const Def* d) {
-    if (values_.contains(d)) return;
-    if (Axm::isa<plug::mem::M>(d->type())) return;
-    if (d->type()->isa<Pi>()) return;
-
-    if (auto sigma = d->type()->isa<Sigma>()) {
-        for (size_t i = 0; i < sigma->num_ops(); ++i)
-            seed_var_tree(d->proj(sigma->num_ops(), i));
-    } else if (auto arr = d->type()->isa<Arr>()) {
-        if (auto n = Lit::isa(arr->arity()))
-            for (size_t i = 0; i < *n; ++i)
-                seed_var_tree(d->proj(*n, i));
-    }
-
-    if (!values_.contains(d)) {
-        auto sym = d->sym().str();
-        if (!sym.empty()) {
-            for (auto& [seeded, v] : values_)
-                if (v.name == "%" + sym) {
-                    values_[d] = v;
-                    return;
-                }
-        }
-    }
-}
 // ----- main functions -----
 
 void MLIREmitter::run() {
@@ -170,7 +90,7 @@ MLIRValue MLIREmitter::emit_def(const Def* def, MLIRBlock& into) {
         else if (std::holds_alternative<MLIRIntType>(mlir_type))
             attr = IntAttr{static_cast<int64_t>(lit->get<uint64_t>()), mlir_type};
         else if (std::holds_alternative<MLIRFloatType>(mlir_type))
-            attr = FloatAttr{lit->get<double>(), mlir_type};
+            attr = FloatAttr{lit_to_double(lit), mlir_type};
         else
             assert(false && "unhandled literal type");
         MLIRValue result{name, mlir_type};
@@ -186,6 +106,10 @@ MLIRValue MLIREmitter::emit_def(const Def* def, MLIRBlock& into) {
         if (Axm::isa<plug::mem::M>(def->type())) return {};
 
         if (auto v = try_emit_tensor_op(app, into)) return *v;
+
+        std::cerr << "unhandled App axiom: callee=" << app->callee()->node_name() << " sym='"
+                  << app->callee()->sym().str() << "'\n";
+        assert(false && "unhandled App in emit_def — missing try_emit_* case");
     }
 
     if (auto ex = def->isa<Extract>()) {
@@ -215,49 +139,91 @@ MLIRValue MLIREmitter::emit_def(const Def* def, MLIRBlock& into) {
                 }
             }
         }
+        // dynamic index: scalar value-select `(false_val, true_val)#cond` → arith.select
+        if (auto v = try_emit_select(ex, into)) return *v;
+
         assert(false && "Extract not seeded");
         return {};
     }
 
-    if (auto tup = def->isa<Tuple>()) {
+    if (def->isa<Tuple>() || def->isa<Pack>()) {
         auto mlir_type = types_.convert(def->type());
-        auto name      = fresh_name(def);
 
-        std::function<void(const Def*, std::vector<double>&)> collect_vals;
-        collect_vals = [&](const Def* d, std::vector<double>& out) {
-            if (auto lit = d->isa<Lit>()) {
-                out.push_back(mim::bitcast_resize<double>(lit->get<u64>()));
-                return;
+        if (std::holds_alternative<MLIRTensorType>(mlir_type)) {
+            auto name = fresh_name(def);
+            auto& tt  = std::get<MLIRTensorType>(mlir_type);
+
+            // Detect uniform Pack: arbitrarily nested Packs all wrapping a single Lit.
+            // Avoid enumerating potentially huge uniform tensors — emit a splat instead.
+            auto* uniform_lit = [&]() -> const Lit* {
+                const Def* cur = def;
+                while (auto pack = cur->isa<Pack>())
+                    cur = pack->body();
+                return cur->isa<Lit>();
+            }();
+
+            if (uniform_lit) {
+                double val            = lit_to_double(uniform_lit);
+                std::string val_str   = format_mlir_float(val);
+                std::string dense_str = std::format("dense<{}>", val_str);
+                MLIRValue result{name, mlir_type};
+                into.ops.emplace_back(std::make_unique<DenseConstOp>(result, std::move(dense_str)));
+                return result;
             }
-            if (auto inner = d->isa<Tuple>()) {
-                for (size_t i = 0; i < inner->num_ops(); ++i)
-                    collect_vals(inner->op(i), out);
-                return;
-            }
-            if (auto pack = d->isa<Pack>()) {
-                if (auto n = Lit::isa(pack->arity())) {
-                    for (size_t i = 0; i < *n; ++i)
-                        collect_vals(pack->body(), out);
+
+            // Non-uniform: enumerate as before.
+            std::function<void(const Def*, std::vector<double>&)> collect_vals;
+            collect_vals = [&](const Def* d, std::vector<double>& out) {
+                if (auto lit = d->isa<Lit>()) {
+                    out.push_back(lit_to_double(lit));
                     return;
                 }
-            }
-            assert(false && "unexpected node in literal tensor");
-        };
+                if (auto inner = d->isa<Tuple>()) {
+                    for (size_t i = 0; i < inner->num_ops(); ++i)
+                        collect_vals(inner->op(i), out);
+                    return;
+                }
+                if (auto pack = d->isa<Pack>()) {
+                    if (auto n = Lit::isa(pack->arity())) {
+                        for (size_t i = 0; i < *n; ++i)
+                            collect_vals(pack->body(), out);
+                        return;
+                    }
+                }
+                assert(false && "unexpected node in literal tensor");
+            };
 
-        auto& tt = std::get<MLIRTensorType>(mlir_type);
-        std::vector<double> flat_vals;
-        collect_vals(tup, flat_vals);
-        std::string dense_str = make_dense_attr(flat_vals, tt);
-
-        MLIRValue result{name, mlir_type};
-        into.ops.emplace_back(std::make_unique<DenseConstOp>(result, std::move(dense_str)));
-        return result;
+            std::vector<double> flat_vals;
+            collect_vals(def, flat_vals);
+            std::string dense_str = make_dense_attr(flat_vals, tt);
+            MLIRValue result{name, mlir_type};
+            into.ops.emplace_back(std::make_unique<DenseConstOp>(result, std::move(dense_str)));
+            return result;
+        }
     }
 
     std::cerr << "unhandled def: " << def->node_name() << " sym='" << def->sym().str() << "'"
               << " type=" << def->type()->node_name() << "\n";
     assert(false && "unhandled def in emit_def");
     return {};
+}
+
+std::optional<MLIRValue> MLIREmitter::try_emit_select(const Extract* ex, MLIRBlock& into) {
+    auto hit = as_bool_select_tuple(ex);
+    if (!hit) return std::nullopt;
+    auto [false_def, true_def] = *hit;
+
+    // both elements must be plain values, not Lams — that's the control-flow case instead
+    if (false_def->isa_mut<Lam>() || true_def->isa_mut<Lam>()) return std::nullopt;
+
+    auto false_val = get_or_emit(false_def, into);
+    auto true_val  = get_or_emit(true_def, into);
+    auto cond_val  = get_or_emit(ex->index(), into);
+
+    auto t = types_.convert(ex->type());
+    MLIRValue result{fresh_name(ex), t};
+    into.ops.emplace_back(std::make_unique<SelectOp>(result, cond_val, true_val, false_val));
+    return result;
 }
 
 std::optional<MLIRValue> MLIREmitter::try_emit_arith(const App* app, MLIRBlock& into) {
@@ -383,7 +349,6 @@ std::optional<MLIRValue> MLIREmitter::try_emit_arith(const App* app, MLIRBlock& 
         into.ops.emplace_back(std::make_unique<BinaryIntOp>(result, kind, a, b));
         return result;
     }
-
     return std::nullopt;
 }
 
