@@ -349,6 +349,60 @@ std::optional<MLIRValue> MLIREmitter::try_emit_arith(const App* app, MLIRBlock& 
         into.ops.emplace_back(std::make_unique<BinaryIntOp>(result, kind, a, b));
         return result;
     }
+
+    // math::is_finite
+    if (auto isf = Axm::isa<plug::math::is_finite>(app)) {
+        auto a = get_or_emit(app->arg(), into);
+        MLIRType i1{MLIRIntType{1}};
+        MLIRValue result{fresh_name(def), i1};
+        into.ops.emplace_back(std::make_unique<MathIsFiniteOp>(result, a));
+        return result;
+    }
+
+    // math::abs
+    if (Axm::isa<plug::math::abs>(app)) {
+        auto a = get_or_emit(app->arg(), into);
+        auto t = types_.convert(def->type());
+        MLIRValue result{fresh_name(def), t};
+        into.ops.emplace_back(std::make_unique<MathUnaryOp>(result, MathUnaryOp::Kind::Abs, a));
+        return result;
+    }
+
+    // math::cmp (float comparisons)
+    if (auto cmp = Axm::isa<plug::math::cmp>(app)) {
+        auto [a, b] = cmp->args<2>([this, &into](auto d) { return get_or_emit(d, into); });
+        MLIRType i1{MLIRIntType{1}};
+        CmpfOp::Pred pred;
+        switch (cmp.id()) {
+            case plug::math::cmp::e: pred = CmpfOp::Pred::Oeq; break;
+            case plug::math::cmp::ne: pred = CmpfOp::Pred::One; break;
+            case plug::math::cmp::l: pred = CmpfOp::Pred::Olt; break;
+            case plug::math::cmp::le: pred = CmpfOp::Pred::Ole; break;
+            case plug::math::cmp::g: pred = CmpfOp::Pred::Ogt; break;
+            case plug::math::cmp::ge: pred = CmpfOp::Pred::Oge; break;
+            case plug::math::cmp::ul: pred = CmpfOp::Pred::Ult; break;
+            case plug::math::cmp::ule: pred = CmpfOp::Pred::Ule; break;
+            case plug::math::cmp::ug: pred = CmpfOp::Pred::Ugt; break;
+            case plug::math::cmp::uge: pred = CmpfOp::Pred::Uge; break;
+            case plug::math::cmp::une: pred = CmpfOp::Pred::Une; break;
+            case plug::math::cmp::ue: pred = CmpfOp::Pred::Ueq; break;
+            case plug::math::cmp::o: pred = CmpfOp::Pred::Ord; break;
+            case plug::math::cmp::u: pred = CmpfOp::Pred::Uno; break;
+            default: assert(false && "unhandled math.cmp pred");
+        }
+        MLIRValue result{fresh_name(def), i1};
+        into.ops.emplace_back(std::make_unique<CmpfOp>(result, pred, a, b));
+        return result;
+    }
+
+    // math::exp (exp/log variants — 'lbb' etc. are sub-tag combinations)
+    if (Axm::isa<plug::math::exp>(app)) {
+        auto a = get_or_emit(app->arg(), into);
+        auto t = types_.convert(def->type());
+        MLIRValue result{fresh_name(def), t};
+        into.ops.emplace_back(std::make_unique<MathUnaryOp>(result, MathUnaryOp::Kind::Exp, a));
+        return result;
+    }
     return std::nullopt;
 }
 

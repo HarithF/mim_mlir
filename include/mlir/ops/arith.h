@@ -169,6 +169,40 @@ private:
     Pred pred_;
 };
 
+class CmpfOp : public MLIROp {
+public:
+    enum class Pred { Oeq, One, Olt, Ole, Ogt, Oge, Ult, Ule, Ugt, Uge, Une, Ueq, Ord, Uno };
+    CmpfOp(MLIRValue result, Pred pred, MLIRValue a, MLIRValue b)
+        : MLIROp({std::move(result)}, {std::move(a), std::move(b)})
+        , pred_(pred) {}
+    void print(Printer& p) const override {
+        p.line("{} = arith.cmpf {}, {}, {} : {}", results_[0].name, mnemonic(pred_), operands_[0].name,
+               operands_[1].name, print_type(operands_[0].type));
+    }
+
+private:
+    static std::string_view mnemonic(Pred p) {
+        switch (p) {
+            case Pred::Oeq: return "oeq";
+            case Pred::One: return "one";
+            case Pred::Olt: return "olt";
+            case Pred::Ole: return "ole";
+            case Pred::Ogt: return "ogt";
+            case Pred::Oge: return "oge";
+            case Pred::Ult: return "ult";
+            case Pred::Ule: return "ule";
+            case Pred::Ugt: return "ugt";
+            case Pred::Uge: return "uge";
+            case Pred::Une: return "une";
+            case Pred::Ueq: return "ueq";
+            case Pred::Ord: return "ord";
+            case Pred::Uno: return "uno";
+        }
+        return "?";
+    }
+    Pred pred_;
+};
+
 class IndexCastOp : public MLIROp {
 public:
     IndexCastOp(MLIRValue result, MLIRValue operand)
