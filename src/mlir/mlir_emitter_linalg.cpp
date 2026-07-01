@@ -68,14 +68,14 @@ void MLIREmitter::emit_linalg_generic(const App* app, MLIRBlock& into) {
     //   app0->arg = inputs pack
     //   app1->arg = subscripts
     //   app2->arg = (comb, zero)
-    //   app3->arg = (Tis, Ris, Sis)   [skipped]
+    //   app3->arg = (Tis, Ris, Sis)
     //   app4->arg = S (result shape)
     //   app5->arg = (T, rank)
     auto* app0 = app;
     auto* app1 = app0->callee()->as<App>();
     auto* app2 = app1->callee()->as<App>();
     auto* app3 = app2->callee()->as<App>();
-    auto* app4 = app3->callee()->as<App>(); // skip app3
+    auto* app4 = app3->callee()->as<App>();
     auto* app5 = app4->callee()->as<App>();
     auto* app6 = app5->callee()->as<App>();
 
@@ -142,13 +142,6 @@ void MLIREmitter::emit_linalg_generic(const App* app, MLIRBlock& into) {
     // Affine maps
     size_t total_dims = res_rank;
     for (size_t i = 0; i < n_inputs; ++i) {
-        // auto sub_i = proj_sub(i);
-        //  auto sub_rank_opt = Lit::isa(sub_i->type()->isa<Arr>()->arity());
-        //  assert(sub_rank_opt);
-        /*for (size_t j = 0; j < *sub_rank_opt; ++j) {
-            auto idx = sub_i->proj(*sub_rank_opt, j);
-            if (auto lit = Lit::isa(idx)) total_dims = std::max(total_dims, (size_t)(*lit + 1));
-        }*/
         for (size_t i = 0; i < n_inputs; ++i) {
             auto sub_i      = proj_sub(i);
             size_t sub_rank = get_sub_rank(i);
@@ -178,14 +171,7 @@ void MLIREmitter::emit_linalg_generic(const App* app, MLIRBlock& into) {
             dims.push_back((size_t)(*Lit::isa(get_sub_dim(sub_i, sub_rank, j))));
         indexing_maps.push_back(make_map(dims));
     }
-    /*for (size_t i = 0; i < n_inputs; ++i) {
-        auto sub_i        = proj_sub(i);
-        auto sub_rank_opt = Lit::isa(sub_i->type()->isa<Arr>()->arity());
-        std::vector<size_t> dims;
-        for (size_t j = 0; j < *sub_rank_opt; ++j)
-            dims.push_back((size_t)(*Lit::isa(sub_i->proj(*sub_rank_opt, j))));
-        indexing_maps.push_back(make_map(dims));
-    }*/
+
     std::vector<size_t> out_dims;
     for (size_t i = 0; i < res_rank; ++i)
         out_dims.push_back(i);
