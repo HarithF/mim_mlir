@@ -26,6 +26,22 @@ bool MLIREmitter::is_return_callee(const Def* c, const Def* ret_var) {
     return false;
 }
 
+MLIRValue MLIREmitter::wrap_as_tensor(const Def* input, MLIRValue in_val, MLIRBlock& into) {
+    MLIRTensorType scalar_tensor_t;
+    scalar_tensor_t.shape = {}; // rank 0
+    scalar_tensor_t.elem  = std::make_shared<MLIRTypeNode>(in_val.type);
+    MLIRType wrapped_t{std::move(scalar_tensor_t)};
+
+    auto lit = input->isa<Lit>();
+    assert(lit && "scalar broadcast input must be a literal — non-literal scalar splat not yet handled");
+
+    double val            = lit_to_double(lit);
+    std::string dense_str = std::format("dense<{}>", format_mlir_float(val));
+    MLIRValue wrapped{fresh_name(input) + ".splat", wrapped_t};
+    into.ops.emplace_back(std::make_unique<DenseConstOp>(wrapped, std::move(dense_str)));
+    return wrapped;
+}
+
 double MLIREmitter::lit_to_double(const Lit* lit) {
     auto mlir_type = types_.convert(lit->type());
     auto& ft       = std::get<MLIRFloatType>(mlir_type);
