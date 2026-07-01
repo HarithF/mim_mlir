@@ -3,6 +3,8 @@
 #include <format>
 #include <stdexcept>
 
+#include "mlir/ops/arith.h"
+
 namespace mim::mlir_be {
 
 std::string print_type(const MLIRTypeNode& n) { return print_type(n.type); }
@@ -66,7 +68,7 @@ std::string print_attr(const MLIRAttr& a) {
                 return std::format("{} : {}", v.value, print_type(v.type));
 
             else if constexpr (std::is_same_v<T, FloatAttr>)
-                return std::format("{} : {}", v.value, print_type(v.type));
+                return std::format("{} : {}", format_mlir_float(v.value), print_type(v.type));
 
             else if constexpr (std::is_same_v<T, IndexAttr>)
                 return std::format("{} : index", v.value);
