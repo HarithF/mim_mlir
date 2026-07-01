@@ -7,6 +7,7 @@
 #include <mim/plug/mem/mem.h>
 
 #include "mlir/mlir_emitter.h"
+#include "mlir/ops/scf.h"
 
 namespace mim::mlir_be {
 
@@ -164,7 +165,7 @@ std::optional<std::tuple<MLIRValue, Lam*, Lam*>> MLIREmitter::detect_cond_branch
     auto* ex = app->callee()->isa<Extract>();
     if (!ex) return std::nullopt;
 
-    auto hit = as_bool_select_tuple(ex);
+    auto hit = select_tuple_as_bool(ex);
     if (!hit) return std::nullopt;
     auto [false_def, true_def] = *hit;
 
