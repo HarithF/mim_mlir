@@ -1,7 +1,6 @@
 #pragma once
 #include <cmath>
 
-#include <functional>
 #include <string_view>
 
 #include "mlir/printer.h"
@@ -227,40 +226,5 @@ public:
 private:
     std::string attr_;
 };
-
-inline std::string format_mlir_float(double v) {
-    if (std::isnan(v)) return "0x7FC00000";
-    if (std::isinf(v)) return v > 0 ? "0x7F800000" : "0xFF800000";
-    return (v == std::floor(v)) ? std::format("{:.1f}", v) : std::format("{}", v);
-}
-
-inline std::string make_dense_attr(const std::vector<double>& vals, const MLIRTensorType& tt) {
-    std::vector<size_t> dims;
-    for (auto& d : tt.shape)
-        dims.push_back(d ? static_cast<size_t>(*d) : 0);
-
-    std::function<std::string(size_t, size_t&)> emit_nested;
-    emit_nested = [&](size_t dim_idx, size_t& flat_idx) -> std::string {
-        if (dim_idx == dims.size() - 1) {
-            std::string s = "[";
-            for (size_t i = 0; i < dims[dim_idx]; ++i) {
-                if (i) s += ", ";
-                // print as integer if whole number, float otherwise
-                double v = vals[flat_idx++];
-                s += format_mlir_float(v);
-            }
-            return s + "]";
-        }
-        std::string s = "[";
-        for (size_t i = 0; i < dims[dim_idx]; ++i) {
-            if (i) s += ", ";
-            s += emit_nested(dim_idx + 1, flat_idx);
-        }
-        return s + "]";
-    };
-
-    size_t idx = 0;
-    return "dense<" + emit_nested(0, idx) + ">";
-}
 
 } // namespace mim::mlir_be

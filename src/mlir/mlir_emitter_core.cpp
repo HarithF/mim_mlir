@@ -17,6 +17,7 @@
 
 #include "mlir/mlir_emitter.h"
 #include "mlir/ops/arith.h"
+#include "mlir/ops/tensor_util.h"
 
 namespace mim::mlir_be {
 
@@ -149,52 +150,28 @@ MLIRValue MLIREmitter::emit_def(const Def* def, MLIRBlock& into) {
             auto name = fresh_name(def);
             auto& tt  = std::get<MLIRTensorType>(mlir_type);
 
-            // Detect uniform Pack: arbitrarily nested Packs all wrapping a single Lit.
-            // Avoid enumerating potentially huge uniform tensors — emit a splat instead.
-            auto* uniform_lit = [&]() -> const Lit* {
+            // Uniform Pack: all elements are the same Lit — emit a splat.
+            {
                 const Def* cur = def;
                 while (auto pack = cur->isa<Pack>())
                     cur = pack->body();
-                return cur->isa<Lit>();
-            }();
+                if (auto lit = cur->isa<Lit>()) {
+                    std::string dense_str = make_dense_splat(lit->get<u64>(), tt);
+                    MLIRValue result{name, mlir_type};
+                    into.ops.emplace_back(std::make_unique<DenseConstOp>(result, std::move(dense_str)));
+                    return result;
+                }
+            }
 
-            if (uniform_lit) {
-                double val            = lit_to_double(uniform_lit);
-                std::string val_str   = format_mlir_float(val);
-                std::string dense_str = std::format("dense<{}>", val_str);
+            // Non-uniform: enumerate.
+            {
+                std::vector<uint64_t> raw;
+                collect_lit_tensor(def, raw);
+                auto dense_str = make_dense_attr(raw, tt);
                 MLIRValue result{name, mlir_type};
                 into.ops.emplace_back(std::make_unique<DenseConstOp>(result, std::move(dense_str)));
                 return result;
             }
-
-            // Non-uniform: enumerate as before.
-            std::function<void(const Def*, std::vector<double>&)> collect_vals;
-            collect_vals = [&](const Def* d, std::vector<double>& out) {
-                if (auto lit = d->isa<Lit>()) {
-                    out.push_back(lit_to_double(lit));
-                    return;
-                }
-                if (auto inner = d->isa<Tuple>()) {
-                    for (size_t i = 0; i < inner->num_ops(); ++i)
-                        collect_vals(inner->op(i), out);
-                    return;
-                }
-                if (auto pack = d->isa<Pack>()) {
-                    if (auto n = Lit::isa(pack->arity())) {
-                        for (size_t i = 0; i < *n; ++i)
-                            collect_vals(pack->body(), out);
-                        return;
-                    }
-                }
-                assert(false && "unexpected node in literal tensor");
-            };
-
-            std::vector<double> flat_vals;
-            collect_vals(def, flat_vals);
-            std::string dense_str = make_dense_attr(flat_vals, tt);
-            MLIRValue result{name, mlir_type};
-            into.ops.emplace_back(std::make_unique<DenseConstOp>(result, std::move(dense_str)));
-            return result;
         }
     }
 

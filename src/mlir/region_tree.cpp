@@ -3,7 +3,7 @@
 #include <format>
 #include <stdexcept>
 
-#include "mlir/ops/arith.h"
+#include "mlir/ops/tensor_util.h"
 
 namespace mim::mlir_be {
 

@@ -9,6 +9,7 @@
 #include <mim/plug/tensor/tensor.h>
 
 #include "mlir/mlir_emitter.h"
+#include "mlir/ops/tensor_util.h"
 
 namespace mim::mlir_be {
 
@@ -35,37 +36,10 @@ MLIRValue MLIREmitter::wrap_as_tensor(const Def* input, MLIRValue in_val, MLIRBl
     auto lit = input->isa<Lit>();
     assert(lit && "scalar broadcast input must be a literal — non-literal scalar splat not yet handled");
 
-    double val            = lit_to_double(lit);
-    std::string dense_str = std::format("dense<{}>", format_mlir_float(val));
+    auto dense_str = make_dense_splat(lit->get<u64>(), std::get<MLIRTensorType>(wrapped_t));
     MLIRValue wrapped{fresh_name(input) + ".splat", wrapped_t};
     into.ops.emplace_back(std::make_unique<DenseConstOp>(wrapped, std::move(dense_str)));
     return wrapped;
-}
-
-double MLIREmitter::lit_to_double(const Lit* lit) {
-    auto mlir_type = types_.convert(lit->type());
-    auto& ft       = std::get<MLIRFloatType>(mlir_type);
-    uint64_t raw   = lit->get<u64>();
-
-    if (ft.bits == 16) {
-        assert(false && "f16 literal-to-double not yet implemented");
-        return 0.0;
-    }
-
-    double val;
-    std::memcpy(&val, &raw, sizeof(val));
-
-    // Mim's parser stores a bare-integer literal ascribed to a float type
-    // (e.g. `1: F32`) as the raw integer value rather than the IEEE bit
-    // pattern of that floating value (which requires `1.0: F32`). This
-    // produces extremely small subnormal magnitudes that essentially never
-    // occur as legitimate constants in real programs. Detect via the f64
-    // exponent and correct.
-    uint64_t exp_bits         = raw & 0x7FF0000000000000ull;
-    bool is_subnormal_nonzero = (exp_bits == 0) && (raw != 0);
-    if (is_subnormal_nonzero) return static_cast<double>(raw); // reinterpret as the intended integer value
-
-    return val;
 }
 
 MLIRValue MLIREmitter::get_or_emit(const Def* def, MLIRBlock& into) {
@@ -134,5 +108,31 @@ void MLIREmitter::seed_var_tree(const Def* d) {
                 }
         }
     }
+}
+
+double MLIREmitter::lit_to_double(const Lit* lit) {
+    auto mlir_type = types_.convert(lit->type());
+    auto& ft       = std::get<MLIRFloatType>(mlir_type);
+    uint64_t raw   = lit->get<u64>();
+
+    if (ft.bits == 16) {
+        assert(false && "f16 literal-to-double not yet implemented");
+        return 0.0;
+    }
+
+    double val;
+    std::memcpy(&val, &raw, sizeof(val));
+
+    // Mim's parser stores a bare-integer literal ascribed to a float type
+    // (e.g. `1: F32`) as the raw integer value rather than the IEEE bit
+    // pattern of that floating value (which requires `1.0: F32`). This
+    // produces extremely small subnormal magnitudes that essentially never
+    // occur as legitimate constants in real programs. Detect via the f64
+    // exponent and correct.
+    uint64_t exp_bits         = raw & 0x7FF0000000000000ull;
+    bool is_subnormal_nonzero = (exp_bits == 0) && (raw != 0);
+    if (is_subnormal_nonzero) return static_cast<double>(raw); // reinterpret as the intended integer value
+
+    return val;
 }
 } // namespace mim::mlir_be
