@@ -9,6 +9,8 @@ fun extern fmul(a: %math.F32, b: %math.F32): %math.F32 =
     return r;
 
 // CHECK: module
-// CHECK: func.func public @fmul(%a: f32, %b: f32) -> f32
+// CHECK: func.func public @fmul(%{{.*}}: tensor<2xf32>) -> f32
+// CHECK: tensor.extract
+// CHECK: tensor.extract
 // CHECK: arith.mulf
 // CHECK: func.return

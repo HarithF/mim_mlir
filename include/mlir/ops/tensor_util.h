@@ -17,20 +17,20 @@ inline std::string format_mlir_float(double v) {
     return (v == std::floor(v)) ? std::format("{:.1f}", v) : std::format("{}", v);
 }
 
-inline std::string format_lit(uint64_t raw, const MLIRType& elem_type) {
-    if (std::holds_alternative<MLIRFloatType>(elem_type)) {
-        double val;
-        // Mim's parser stores a bare-integer literal ascribed to a float type
-        // (e.g. `1: F32`) as the raw integer value rather than the IEEE bit
-        // pattern of that floating value (which requires `1.0: F32`). This
-        // produces extremely small subnormal magnitudes that essentially never
-        // occur as legitimate constants in real programs. Detect via the f64
-        // exponent and correct.
-
-        std::memcpy(&val, &raw, sizeof(val));
-        if ((raw & 0x7FF0000000000000ull) == 0 && raw != 0) val = static_cast<double>(raw);
-        return format_mlir_float(val);
+inline double lit_to_double(uint64_t raw, uint32_t bits) {
+    if (bits == 32) {
+        uint32_t b32 = static_cast<uint32_t>(raw);
+        float f;
+        std::memcpy(&f, &b32, sizeof(f));
+        return static_cast<double>(f);
     }
+    double d;
+    std::memcpy(&d, &raw, sizeof(d));
+    return d;
+}
+
+inline std::string format_lit(uint64_t raw, const MLIRType& elem_type) {
+    if (auto ft = std::get_if<MLIRFloatType>(&elem_type)) return format_mlir_float(lit_to_double(raw, ft->bits));
     return std::to_string(static_cast<int64_t>(raw));
 }
 

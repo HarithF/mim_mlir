@@ -1,5 +1,3 @@
-
-#pragma once
 #include <mim/plug/affine/affine.h>
 #include <mim/plug/affine/autogen.h>
 #include <mim/plug/core/core.h>
@@ -49,7 +47,10 @@ MLIRValue MLIREmitter::get_or_emit(const Def* def, MLIRBlock& into) {
     return val;
 }
 
-// Recursively unpack op into individual MLIR argsv
+// Recursively unpack op into individual MLIR args.
+// Heterogeneous Sigma → recurse into each element.
+// Arr → seed the whole tuple as a single tensor value; individual elements are
+// pulled out lazily via `tensor.extract` in emit_def when the body needs them.
 void MLIREmitter::seed_dom_op(const Def* op, std::vector<MLIRValue>& args) {
     if (Axm::isa<plug::mem::M>(op->type())) return;
     if (op->type()->isa<Pi>()) return;
@@ -58,24 +59,6 @@ void MLIREmitter::seed_dom_op(const Def* op, std::vector<MLIRValue>& args) {
         for (size_t i = 0; i < sigma->num_ops(); ++i)
             seed_dom_op(op->proj(sigma->num_ops(), i), args);
         return;
-    }
-    if (auto arr = op->type()->isa<Arr>()) {
-        if (auto n = Lit::isa(arr->arity())) {
-            bool is_arg_tuple  = false;
-            size_t check_limit = std::min(*n, (uint64_t)4);
-            for (size_t i = 0; i < check_limit; ++i) {
-                auto sym = op->proj(*n, i)->sym().str();
-                if (!sym.empty() && sym[0] != '_') {
-                    is_arg_tuple = true;
-                    break;
-                }
-            }
-            if (is_arg_tuple) {
-                for (size_t i = 0; i < *n; ++i)
-                    seed_dom_op(op->proj(*n, i), args);
-                return;
-            }
-        }
     }
 
     MLIRValue v{fresh_name(op), types_.convert(op->type())};
@@ -110,29 +93,4 @@ void MLIREmitter::seed_var_tree(const Def* d) {
     }
 }
 
-double MLIREmitter::lit_to_double(const Lit* lit) {
-    auto mlir_type = types_.convert(lit->type());
-    auto& ft       = std::get<MLIRFloatType>(mlir_type);
-    uint64_t raw   = lit->get<u64>();
-
-    if (ft.bits == 16) {
-        assert(false && "f16 literal-to-double not yet implemented");
-        return 0.0;
-    }
-
-    double val;
-    std::memcpy(&val, &raw, sizeof(val));
-
-    // Mim's parser stores a bare-integer literal ascribed to a float type
-    // (e.g. `1: F32`) as the raw integer value rather than the IEEE bit
-    // pattern of that floating value (which requires `1.0: F32`). This
-    // produces extremely small subnormal magnitudes that essentially never
-    // occur as legitimate constants in real programs. Detect via the f64
-    // exponent and correct.
-    uint64_t exp_bits         = raw & 0x7FF0000000000000ull;
-    bool is_subnormal_nonzero = (exp_bits == 0) && (raw != 0);
-    if (is_subnormal_nonzero) return static_cast<double>(raw); // reinterpret as the intended integer value
-
-    return val;
-}
 } // namespace mim::mlir_be

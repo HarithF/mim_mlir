@@ -1,5 +1,8 @@
+//
 // Top-level driver (run/emit_func), argument seeding, the emit_def leaf
 // dispatcher, and the scalar-arithmetic dispatch helper (try_emit_arith).
+
+#include <cstdint>
 
 #include <format>
 #include <functional>
@@ -17,6 +20,7 @@
 
 #include "mlir/mlir_emitter.h"
 #include "mlir/ops/arith.h"
+#include "mlir/ops/memref.h"
 #include "mlir/ops/tensor_util.h"
 
 namespace mim::mlir_be {
@@ -86,8 +90,9 @@ MLIRValue MLIREmitter::emit_def(const Def* def, MLIRBlock& into) {
             attr = IndexAttr{static_cast<int64_t>(lit->get<uint64_t>())};
         else if (std::holds_alternative<MLIRIntType>(mlir_type))
             attr = IntAttr{static_cast<int64_t>(lit->get<uint64_t>()), mlir_type};
-        else if (std::holds_alternative<MLIRFloatType>(mlir_type))
-            attr = FloatAttr{lit_to_double(lit), mlir_type};
+        else if (auto ft = std::get_if<MLIRFloatType>(&mlir_type))
+            attr = FloatAttr{lit_to_double(lit->get<uint64_t>(), ft->bits), mlir_type};
+
         else
             assert(false && "unhandled literal type");
         MLIRValue result{name, mlir_type};
@@ -136,6 +141,38 @@ MLIRValue MLIREmitter::emit_def(const Def* def, MLIRBlock& into) {
                 }
             }
         }
+        // Walk up an Extract chain of literal indices
+        if (std::holds_alternative<MLIRIntType>(types_.convert(ex->type()))
+            || std::holds_alternative<MLIRFloatType>(types_.convert(ex->type()))
+            || std::holds_alternative<MLIRIndexType>(types_.convert(ex->type()))) {
+            std::vector<size_t> indices; // innermost-first
+            const Def* cur = ex;
+            while (auto step = cur->isa<Extract>()) {
+                auto lit = Lit::isa(step->index());
+                if (!lit) break;
+                indices.push_back(static_cast<size_t>(*lit));
+                cur = step->tuple();
+                if (auto it = values_.find(cur); it != values_.end()) {
+                    if (std::holds_alternative<MLIRTensorType>(it->second.type)) {
+                        std::reverse(indices.begin(), indices.end());
+                        std::vector<MLIRValue> idx_vals;
+                        idx_vals.reserve(indices.size());
+                        for (size_t idx : indices) {
+                            MLIRValue idx_v{fresh_name("%c"), MLIRType{MLIRIndexType{}}};
+                            into.ops.emplace_back(
+                                std::make_unique<ConstantOp>(idx_v, IndexAttr{static_cast<int64_t>(idx)}));
+                            idx_vals.push_back(idx_v);
+                        }
+                        MLIRValue result{fresh_name(ex), types_.convert(ex->type())};
+                        into.ops.emplace_back(
+                            std::make_unique<TensorExtractOp>(result, it->second, std::move(idx_vals)));
+                        return result;
+                    }
+                    break;
+                }
+            }
+        }
+
         // dynamic index: scalar value-select `(false_val, true_val)#cond` → arith.select
         if (auto v = try_emit_select(ex, into)) return *v;
 
@@ -204,7 +241,9 @@ std::optional<MLIRValue> MLIREmitter::try_emit_arith(const App* app, MLIRBlock& 
     auto* def      = app;
 
     if (auto wrap = Axm::isa<core::wrap>(app)) {
-        auto [a, b]      = wrap->args<2>([this, &into](auto d) { return get_or_emit(d, into); });
+        auto [mode, ab] = wrap->uncurry_args<2>();
+        auto [a, b]     = ab->projs<2>([this, &into](auto d) { return get_or_emit(d, into); });
+        // auto [a, b]      = wrap->args<2>([this, &into](auto d) { return get_or_emit(d, into); });
         auto result_type = types_.convert(def->type());
         BinaryIntOp::Kind kind;
         switch (wrap.id()) {

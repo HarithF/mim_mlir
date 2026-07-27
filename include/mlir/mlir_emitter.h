@@ -48,7 +48,6 @@ private:
     std::string fresh_name(std::string prefix);
     bool is_return_callee(const Def* c, const Def* ret_var);
     MLIRValue wrap_as_tensor(const Def* input, MLIRValue in_val, MLIRBlock& into);
-    double lit_to_double(const Lit* lit);
 
     //  -------arg seeding -----------
     void seed_dom_op(const Def* op, std::vector<MLIRValue>& args);
