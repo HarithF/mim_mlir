@@ -210,6 +210,7 @@ MLIRValue MLIREmitter::emit_def(const Def* def, MLIRBlock& into) {
                 return result;
             }
         }
+        return {};
     }
 
     std::cerr << "unhandled def: " << def->node_name() << " sym='" << def->sym().str() << "'"

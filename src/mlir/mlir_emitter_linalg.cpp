@@ -1,8 +1,4 @@
-
-#include <format>
 #include <functional>
-#include <map>
-#include <set>
 
 #include <mim/lam.h>
 #include <mim/tuple.h>
@@ -12,20 +8,16 @@
 #include <mim/plug/tensor/tensor.h>
 
 #include "mlir/mlir_emitter.h"
+#include "mlir/ops/tensor_util.h"
 
 namespace mim::mlir_be {
 
 std::optional<MLIRValue> MLIREmitter::try_emit_tensor_op(const App* app, MLIRBlock& into) {
     auto* def = app;
 
-    if (Axm::isa<plug::tensor::map_reduce>(app) || Axm::isa<plug::tensor::map_reduce_ds>(app)) {
+    if (Axm::isa<plug::tensor::map_reduce>(app)) {
         emit_linalg_generic(app, into);
         return values_[def];
-    }
-
-    if (Axm::isa<plug::tensor::map_reduce_aff>(app)) {
-        assert(false && "map_reduce_aff not yet supported");
-        return MLIRValue{};
     }
 
     if (auto bc = Axm::isa<plug::tensor::broadcast>(app)) {
@@ -59,131 +51,131 @@ std::optional<MLIRValue> MLIREmitter::try_emit_tensor_op(const App* app, MLIRBlo
         into.ops.emplace_back(std::make_unique<LinalgBroadcastOp>(result, in_val, out_buf, std::move(bcast_dims)));
         return result;
     }
+    if (auto get_ax = Axm::isa<plug::tensor::get>(app)) {
+        // %tensor.get @(T, r, s) (arr, index)
+
+        auto* arr_def = app->arg()->proj(2, 0);
+        auto* idx_def = app->arg()->proj(2, 1);
+
+        auto arr_val  = get_or_emit(arr_def, into);
+        auto res_type = types_.convert(def->type());
+
+        // unpack index tuple - each element is an Idx literal, cast to index
+        std::vector<MLIRValue> indices;
+        if (auto sigma = idx_def->type()->isa<Sigma>()) {
+            size_t n = sigma->num_ops();
+            for (size_t i = 0; i < n; ++i) {
+                auto elem     = idx_def->proj(n, i);
+                auto elem_val = get_or_emit(elem, into);
+                indices.push_back(types_.to_index(elem_val, into, fresh_name("%idx")));
+            }
+        } else if (auto arr = idx_def->type()->isa<Arr>()) {
+            if (auto n = Lit::isa(arr->arity())) {
+                for (size_t i = 0; i < *n; ++i) {
+                    auto elem_val = get_or_emit(idx_def->proj(*n, i), into);
+                    indices.push_back(types_.to_index(elem_val, into, fresh_name("%idx")));
+                }
+            }
+        } else {
+            // rank-1: bare Idx
+            auto elem_val = get_or_emit(idx_def, into);
+            indices.push_back(types_.to_index(elem_val, into, fresh_name("%idx")));
+        }
+
+        MLIRValue result{fresh_name(def), res_type};
+        into.ops.emplace_back(std::make_unique<TensorExtractOp>(result, arr_val, std::move(indices)));
+        return result;
+    }
 
     return std::nullopt;
 }
-
 void MLIREmitter::emit_linalg_generic(const App* app, MLIRBlock& into) {
-    // Unpack currying chain:
-    //   app0->arg = inputs pack
-    //   app1->arg = subscripts
-    //   app2->arg = (comb, zero)
-    //   app3->arg = (Tis, Ris, Sis)
-    //   app4->arg = S (result shape)
-    //   app5->arg = (T, rank)
-    auto* app0 = app;
-    auto* app1 = app0->callee()->as<App>();
+    // New currying chain (depth 8):
+    //   app0->arg = is          (inputs pack)
+    //   app1->arg = maps        (per-input access lams)
+    //   app2->arg = map_out     (output access lam)
+    //   app3->arg = (f, init)
+    //   app4->arg = (Tis,Ris,Sis) [skip, implicit type args]
+    //   app5->arg = (So, Sr)    (output shape, full loop bounds)
+    //   app6->arg = (To, Ro, Rr)
+    //   app7->arg = nis
+    auto* app1 = app->callee()->as<App>();
     auto* app2 = app1->callee()->as<App>();
     auto* app3 = app2->callee()->as<App>();
     auto* app4 = app3->callee()->as<App>();
     auto* app5 = app4->callee()->as<App>();
     auto* app6 = app5->callee()->as<App>();
+    auto* app7 = app6->callee()->as<App>();
 
-    auto* inputs_pack    = app0->arg();
-    auto* subs           = app1->arg();
-    auto [comb, zero]    = app2->arg()->projs<2>();
-    auto [Tis, Ris, Sis] = app3->arg()->projs<3>();
+    auto* inputs_pack = app->arg();
+    auto* maps_pack   = app1->arg();
+    auto* map_out_def = app2->arg();
+    auto [comb, zero] = app3->arg()->projs<2>();
+    auto [So, Sr]     = app5->arg()->projs<2>();
+    auto [To, Ro, Rr] = app6->arg()->projs<3>();
+    auto* nis_def     = app7->arg();
 
-    auto* S        = app4->arg();
-    auto [T, rank] = app5->arg()->projs<2>();
-    auto* nis      = app6->arg();
-
-    auto n_inputs_opt = Lit::isa(nis);
-    assert(n_inputs_opt && "nis must be a literal");
-    size_t n_inputs = *n_inputs_opt;
+    auto nis_opt = Lit::isa(nis_def);
+    auto Ro_opt  = Lit::isa(Ro);
+    auto Rr_opt  = Lit::isa(Rr);
+    assert(nis_opt && Ro_opt && Rr_opt);
+    size_t n_inputs    = *nis_opt;
+    size_t ro          = *Ro_opt;
+    size_t rr          = *Rr_opt;
+    size_t total_loops = ro + rr;
 
     auto proj_input
         = [&](size_t i) -> const Def* { return n_inputs == 1 ? inputs_pack : inputs_pack->proj(n_inputs, i); };
-    auto proj_sub = [&](size_t i) -> const Def* { return n_inputs == 1 ? subs : subs->proj(n_inputs, i); };
+    auto proj_map_lam = [&](size_t i) -> Lam* {
+        auto* d = n_inputs == 1 ? maps_pack : maps_pack->proj(n_inputs, i);
+        return d->isa_mut<Lam>();
+    };
+    auto* map_out = map_out_def->isa_mut<Lam>();
+    assert(map_out);
 
-    auto* body_lam = comb->isa_mut<Lam>();
-    assert(body_lam && "comb must be a mutable Lam");
-
-    auto res_rank_opt = Lit::isa(rank);
-    assert(res_rank_opt);
-    size_t res_rank = *res_rank_opt;
-
+    // ── Result type from So and To ────────────────────────────────────────
     std::vector<std::optional<int64_t>> res_shape;
-    for (size_t i = 0; i < res_rank; ++i) {
-        auto dim = S->proj(res_rank, i);
+    for (size_t i = 0; i < ro; ++i) {
+        auto dim = ro == 1 ? So : So->proj(ro, i);
         if (auto lit = Lit::isa(dim))
             res_shape.push_back(static_cast<int64_t>(*lit));
         else
             res_shape.push_back(std::nullopt);
     }
-    auto res_elem_type = types_.convert(T);
+    auto res_elem_type = types_.convert(To);
     MLIRTensorType res_tensor;
     res_tensor.shape = res_shape;
     res_tensor.elem  = std::make_shared<MLIRTypeNode>(res_elem_type);
     MLIRType res_type{std::move(res_tensor)};
 
+    // ── Inputs ────────────────────────────────────────────────────────────
     std::vector<MLIRValue> ins;
     for (size_t i = 0; i < n_inputs; ++i)
         ins.push_back(get_or_emit(proj_input(i), into));
 
-    // Output buffer
+    // ── Output buffer ─────────────────────────────────────────────────────
     std::string buf_name = fresh_name(app) + ".buf";
     MLIRValue out_buf{buf_name, res_type};
     into.ops.emplace_back(std::make_unique<TensorEmptyOp>(out_buf));
-
     std::vector<MLIRValue> outs{out_buf};
 
-    auto get_sub_rank = [&](size_t i) -> size_t {
-        auto ris_i = Ris->proj(n_inputs, i);
-        auto lit   = Lit::isa(ris_i);
-        assert(lit && "Ris must be literal");
-        return static_cast<size_t>(*lit);
-    };
-
-    auto get_sub_dim = [&](const Def* sub_i, size_t rank, size_t j) -> const Def* {
-        return rank == 1 ? sub_i : sub_i->proj(rank, j);
-    };
-
-    // Affine maps
-    size_t total_dims = res_rank;
-    for (size_t i = 0; i < n_inputs; ++i) {
-        for (size_t i = 0; i < n_inputs; ++i) {
-            auto sub_i      = proj_sub(i);
-            size_t sub_rank = get_sub_rank(i);
-            for (size_t j = 0; j < sub_rank; ++j) {
-                auto idx = get_sub_dim(sub_i, sub_rank, j);
-                if (auto lit = Lit::isa(idx)) total_dims = std::max(total_dims, (size_t)(*lit + 1));
-            }
-        }
-    }
-
-    auto make_map = [&](std::vector<size_t> dims) -> std::string {
-        std::string a, b;
-        for (size_t i = 0; i < total_dims; ++i)
-            a += (i ? ", " : "") + std::format("d{}", i);
-        for (size_t i = 0; i < dims.size(); ++i)
-            b += (i ? ", " : "") + std::format("d{}", dims[i]);
-        return std::format("affine_map<({}) -> ({})>", a, b);
-    };
+    // ── Affine maps from access lams ──────────────────────────────────────
 
     std::vector<std::string> indexing_maps;
+    for (size_t i = 0; i < n_inputs; ++i)
+        indexing_maps.push_back(lam_to_affine_map(proj_map_lam(i), total_loops));
+    indexing_maps.push_back(lam_to_affine_map(map_out, total_loops));
 
-    for (size_t i = 0; i < n_inputs; ++i) {
-        auto sub_i      = proj_sub(i);
-        size_t sub_rank = get_sub_rank(i);
-        std::vector<size_t> dims;
-        for (size_t j = 0; j < sub_rank; ++j)
-            dims.push_back((size_t)(*Lit::isa(get_sub_dim(sub_i, sub_rank, j))));
-        indexing_maps.push_back(make_map(dims));
-    }
-
-    std::vector<size_t> out_dims;
-    for (size_t i = 0; i < res_rank; ++i)
-        out_dims.push_back(i);
-    indexing_maps.push_back(make_map(out_dims));
-
-    // Iterator types
-    std::set<size_t> out_dim_set(out_dims.begin(), out_dims.end());
+    // ── Iterator types ────────────────────────────────────────────────────
     std::vector<std::string> iterator_types;
-    for (size_t i = 0; i < total_dims; ++i)
-        iterator_types.push_back(out_dim_set.count(i) ? "parallel" : "reduction");
+    for (size_t i = 0; i < ro; ++i)
+        iterator_types.push_back("parallel");
+    for (size_t i = 0; i < rr; ++i)
+        iterator_types.push_back("reduction");
 
+    // ── Body seeding (unchanged — path-based strategy) ────────────────────
     std::vector<MLIRValue> body_args;
+    auto* body_lam = comb->isa_mut<Lam>();
 
     auto* body_var     = body_lam->var();
     auto body_var_type = body_var->type();
@@ -286,35 +278,6 @@ void MLIREmitter::emit_linalg_generic(const App* app, MLIRBlock& into) {
 
     for (auto& [path, val] : path_to_val)
         if (auto d = nav_path(body_var, path)) values_[d] = val;
-
-    DefSet body_visited;
-    std::function<void(const Def*)> walk_body = [&](const Def* d) {
-        if (!body_visited.insert(d).second) return;
-        if (d->isa<Var>()) return;
-        if (d->isa_mut<Lam>()) return;
-
-        if (d->isa<Extract>()) {
-            std::vector<size_t> path;
-            const Def* cur = d;
-            bool ok        = true;
-            while (auto exi = cur->isa<Extract>()) {
-                auto lit = Lit::isa(exi->index());
-                if (!lit) {
-                    ok = false;
-                    break;
-                }
-                path.insert(path.begin(), static_cast<size_t>(*lit));
-                cur = exi->tuple();
-            }
-            if (ok && cur == body_var) {
-                if (auto it = path_to_val.find(path); it != path_to_val.end()) values_[d] = it->second;
-            }
-        }
-        for (auto op : d->ops())
-            walk_body(op);
-    };
-    walk_body(body_lam->body());
-
     DefSet pre_body_keys;
     for (auto& [d, _] : values_)
         pre_body_keys.insert(d);
@@ -341,7 +304,6 @@ void MLIREmitter::emit_linalg_body(Lam* body_lam, MLIRBlock& body_bb) {
 
     if (is_return_callee(callee, body_lam->ret_var())) {
         std::vector<MLIRValue> yield_vals;
-        auto* arg = app->arg();
         if (!Axm::isa<plug::mem::M>(arg->type())) {
             auto v = get_or_emit(arg, body_bb);
             if (!v.empty()) yield_vals.push_back(v);

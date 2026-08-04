@@ -8,7 +8,6 @@
 namespace mim::mlir_be {
 
 MLIRType TypeConverter::convert(const Def* type) {
-    // check cache first
     if (auto it = cache_.find(type); it != cache_.end()) return it->second;
 
     MLIRType result = [&]() -> MLIRType {
@@ -30,6 +29,9 @@ MLIRType TypeConverter::convert(const Def* type) {
         }
 
         if (auto arr = type->isa<Arr>()) {
+            auto body = arr->body();
+            // Arr of Idx (e.g. «2; Idx 1024») is an index tuple not a tensor
+            if (Idx::isa(body)) return MLIRIntType{64}; // or opaque — caller unpacks
             MLIRTensorType t;
             // flatten nested arrays into a single shape vector
             const Def* cur = arr;
@@ -44,7 +46,6 @@ MLIRType TypeConverter::convert(const Def* type) {
             return t;
         }
 
-        // Sigma [mem::M, T] → T  (strip mem)
         if (auto sigma = type->isa<Sigma>()) {
             if (sigma->num_ops() == 2 && Axm::isa<plug::mem::M>(sigma->op(0))) return convert(sigma->op(1));
 
@@ -61,7 +62,6 @@ MLIRType TypeConverter::convert(const Def* type) {
             return MLIROpaqueType{s};
         }
 
-        // fallback
         return MLIROpaqueType{"!llvm.ptr"};
     }();
 
