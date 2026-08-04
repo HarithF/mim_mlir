@@ -45,7 +45,7 @@ jobs:
       - name: Configure Debug
         if: matrix.build-type == 'Debug'
         run: |
-          CC=clang-20 CXX=clang++-20 cmake -B mimir/build                                                                              \
+          CC=clang-20 CXX=clang++-20 cmake -S mimir -B mimir/build                                                                              \
             -DCMAKE_BUILD_TYPE=${{matrix.build-type}}                                                                                                  \
             -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined,leak,bounds -fsanitize-address-use-after-scope -fno-omit-frame-pointer -fno-sanitize=vptr" \
             -DBUILD_TESTING=ON                                                                                                                         \
