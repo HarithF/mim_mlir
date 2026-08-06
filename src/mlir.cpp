@@ -23,7 +23,7 @@ public:
         auto name = world().name() ? std::string(world().name().view()) : "a"s;
         auto ofs  = std::ofstream(name + ".mlir"s);
         MLIREmitter emitter{world(), ofs};
-        world().dump();
+        // world().dump();
         emitter.run();
     }
 };

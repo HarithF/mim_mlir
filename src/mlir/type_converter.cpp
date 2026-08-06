@@ -29,9 +29,6 @@ MLIRType TypeConverter::convert(const Def* type) {
         }
 
         if (auto arr = type->isa<Arr>()) {
-            auto body = arr->body();
-            // Arr of Idx (e.g. «2; Idx 1024») is an index tuple not a tensor
-            if (Idx::isa(body)) return MLIRIntType{64}; // or opaque — caller unpacks
             MLIRTensorType t;
             // flatten nested arrays into a single shape vector
             const Def* cur = arr;

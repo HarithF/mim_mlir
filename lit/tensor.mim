@@ -10,7 +10,9 @@ let R: %tensor.Ring = (F32, 0: F32, %math.arith.add @f32 0, %math.arith.mul @f32
 lam F32_add {r: Nat, s: «r; Nat»} [is: [«s; F32», «s; F32»]] : «s; F32» = %tensor.binary (%math.arith.add @f32 0) is;
 lam F32_tanh {r: Nat, s: «r; Nat»} [i: «s; F32»] : «s; F32» = %tensor.unary (%math.tri.tanh @f32 0) i;
 
-con extern main_hlo [arg0: «784; «1024; F32»», arg1: «1024; F32», arg2: «1024; «1024; F32»», arg3: «1024; F32», arg4: «1024; «10; F32»», arg5: «10; F32», arg6: «128; «784; F32»», arg7: «128; «10; F32»», return: Cn [«128; F32»]] =
+fun max_fun (acc: F32, y: «1; F32»)@tt: F32 = return (%math.extrema.ieee754max @f32 0 (acc, y#0_1));
+
+con extern main_tensor [arg0: «784; «1024; F32»», arg1: «1024; F32», arg2: «1024; «1024; F32»», arg3: «1024; F32», arg4: «1024; «10; F32»», arg5: «10; F32», arg6: «128; «784; F32»», arg7: «128; «10; F32»», return: Cn [«128; F32»]] =
   let v_0 = %tensor.product_2d R (arg6, arg0);
   let v_2 = %tensor.broadcast ((1, 1024), (128, 1024), arg1);
   let v_3 = F32_add @(2, (128, 1024)) (v_0, v_2);
@@ -23,14 +25,18 @@ con extern main_hlo [arg0: «784; «1024; F32»», arg1: «1024; F32», arg2: «
   let v_16 = %tensor.broadcast ((1, 10), (128, 10), arg5);
   let v_17 = F32_add @(2, (128, 10)) (v_14, v_16);
   let v_cst_0 = 0xFEC00000 : F32;
-  let v_18 = %tensor.map_reduce_ds @1 (128,) @(F32, 2, (128, 10))
-             ((%math.extrema.ieee754max @f32 0), v_cst_0)
-             ((0, 1),)
-             (v_17,);
+
+  let v_18 = %tensor.map_reduce @1 @(F32, 1, 1)
+             ((128,), (128, 10))
+             @(F32, 2, (128, 10))
+             (max_fun, v_cst_0)
+             (%tensor.proj_map @(2, 1) (0,))
+             (%tensor.proj_map @(2, 2) (0, 1),)
+             v_17;
   return v_18;
 
 // CHECK: module
-// CHECK: func.func public @main_hlo
+// CHECK: func.func public @main_tensor
 // CHECK: tensor<784x1024xf32>
 // CHECK: linalg.generic
 // CHECK: affine_map<(d0, d1, d2) -> (d0, d2)>

@@ -242,9 +242,8 @@ std::optional<MLIRValue> MLIREmitter::try_emit_arith(const App* app, MLIRBlock& 
     auto* def      = app;
 
     if (auto wrap = Axm::isa<core::wrap>(app)) {
-        auto [mode, ab] = wrap->uncurry_args<2>();
-        auto [a, b]     = ab->projs<2>([this, &into](auto d) { return get_or_emit(d, into); });
-        // auto [a, b]      = wrap->args<2>([this, &into](auto d) { return get_or_emit(d, into); });
+        auto [a, b] = app->args<2>([this, &into](auto d) { return get_or_emit(d, into); });
+
         auto result_type = types_.convert(def->type());
         BinaryIntOp::Kind kind;
         switch (wrap.id()) {
@@ -260,7 +259,9 @@ std::optional<MLIRValue> MLIREmitter::try_emit_arith(const App* app, MLIRBlock& 
     }
 
     if (auto div = Axm::isa<core::div>(app)) {
-        auto [a, b]      = div->args<2>([this, &into](auto d) { return get_or_emit(d, into); });
+        // auto [a, b]      = div->args<2>([this, &into](auto d) { return get_or_emit(d, into); });
+        auto [a, b] = div->args<2>([this, &into](auto d) { return get_or_emit(d, into); });
+
         auto result_type = types_.convert(def->type());
         BinaryIntOp::Kind kind;
         switch (div.id()) {
@@ -276,7 +277,8 @@ std::optional<MLIRValue> MLIREmitter::try_emit_arith(const App* app, MLIRBlock& 
     }
 
     if (auto arith = Axm::isa<plug::math::arith>(app)) {
-        auto [a, b]      = arith->args<2>([this, &into](auto d) { return get_or_emit(d, into); });
+        auto [a, b] = arith->args<2>([this, &into](auto d) { return get_or_emit(d, into); });
+
         auto result_type = types_.convert(def->type());
         BinaryFloatOp::Kind kind;
         switch (arith.id()) {
@@ -294,6 +296,7 @@ std::optional<MLIRValue> MLIREmitter::try_emit_arith(const App* app, MLIRBlock& 
 
     if (auto icmp = Axm::isa<core::icmp>(app)) {
         auto [a, b] = icmp->args<2>([this, &into](auto d) { return get_or_emit(d, into); });
+
         MLIRType i1{MLIRIntType{1}};
         CmpiOp::Pred pred;
         switch (icmp.id()) {
@@ -333,7 +336,8 @@ std::optional<MLIRValue> MLIREmitter::try_emit_arith(const App* app, MLIRBlock& 
     // math::extrema → BinaryFloatOp
     if (auto extr = Axm::isa<plug::math::extrema>(def)) {
         auto [a, b] = extr->args<2>([this, &into](auto d) { return get_or_emit(d, into); });
-        auto t      = types_.convert(extr->type());
+
+        auto t = types_.convert(extr->type());
         BinaryFloatOp::Kind kind;
         switch (extr.id()) {
             case plug::math::extrema::fmax: kind = BinaryFloatOp::Kind::MaxNum; break;
@@ -384,6 +388,7 @@ std::optional<MLIRValue> MLIREmitter::try_emit_arith(const App* app, MLIRBlock& 
     // math::cmp (float comparisons)
     if (auto cmp = Axm::isa<plug::math::cmp>(app)) {
         auto [a, b] = cmp->args<2>([this, &into](auto d) { return get_or_emit(d, into); });
+
         MLIRType i1{MLIRIntType{1}};
         CmpfOp::Pred pred;
         switch (cmp.id()) {
