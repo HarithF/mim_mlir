@@ -9,6 +9,9 @@
 #include <mim/lam.h>
 #include <mim/tuple.h>
 
+#include <mim/plug/affine/affine.h>
+#include <mim/plug/affine/autogen.h>
+
 #include "mlir/region_tree.h"
 
 namespace mim::mlir_be {
@@ -92,6 +95,36 @@ inline std::string make_dense_splat(uint64_t raw, const MLIRTensorType& tt) {
     return std::format("dense<{}>", format_lit(raw, tt.elem->type));
 }
 
+inline bool is_affine_mod(const Def* d, const Def*& value, const Def*& modulus) {
+    auto app = d->isa<App>();
+    if (!app) return false;
+
+    auto semiop = Axm::isa<plug::affine::semiop>(app);
+    if (!semiop || semiop.id() != plug::affine::semiop::mod) return false;
+    std::tie(value, modulus) = app->arg()->projs<2>();
+    return true;
+}
+
+inline std::optional<size_t> find_driving_param(const Def* d, const std::vector<const Def*>& params) {
+    for (size_t j = 0; j < params.size(); ++j)
+        if (d == params[j]) return j;
+
+    const Def *value, *modulus;
+    if (is_affine_mod(d, value, modulus)) {
+        if (auto m = Lit::isa(modulus); m && *m == 1) return std::nullopt; // degenerate: always 0
+        return find_driving_param(value, params);
+    }
+
+    std::optional<size_t> found;
+    for (auto op : d->ops()) {
+        auto sub = find_driving_param(op, params);
+        if (!sub) continue;
+        if (found && *found != *sub) return std::nullopt; // ambiguous: mixes >1 param
+        found = sub;
+    }
+    return found;
+}
+
 inline std ::string lam_to_affine_map(Lam* lam, size_t total_loops) {
     assert(lam && lam->is_set());
 
@@ -118,14 +151,7 @@ inline std ::string lam_to_affine_map(Lam* lam, size_t total_loops) {
         for (size_t i = 0; i < actual_params; ++i)
             params.push_back(lam->var()->proj(actual_params, i));
 
-    const Def* result_def = nullptr;
-    if (auto* body_app = lam->body()->isa<App>()) {
-        result_def = body_app->arg();
-    } else {
-        // direct style: body IS the result (e.g. lam with `as o` pattern)
-        result_def = lam->body();
-    }
-
+    const Def* result_def = lam->body();
     assert(result_def);
 
     std::string result_str;
@@ -163,7 +189,12 @@ inline std ::string lam_to_affine_map(Lam* lam, size_t total_loops) {
                     break;
                 }
             }
-            if (!found) result_str += "0"; // broadcast
+            if (!found) {
+                if (auto j = find_driving_param(results[i], params))
+                    result_str += std::format("d{}", *j);
+                else
+                    result_str += "0"; // genuine broadcast dim
+            }
         }
     }
 
