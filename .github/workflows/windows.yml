@@ -48,7 +48,7 @@ jobs:
           set CXX=cl.exe
           python -c "import sys; print(sys.executable)" > tmpPath
           set /p PYTHON_EXE= < tmpPath
-          cmake -B mimir/build -G Ninja   ^
+          cmake -S mimir -B mimir/build -G Ninja   ^
                 -DCMAKE_BUILD_TYPE=${{matrix.build-type}} ^
                 -DBUILD_TESTING=ON                        ^
                 -DMIM_BUILD_EXAMPLES=ON                   ^
@@ -75,4 +75,4 @@ jobs:
         run: |
           call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
           set PATH=mimir/bin;%PATH%
-          cmake --build mimir/build -v --target test-all
+          cmake --build . -v --target test-all
