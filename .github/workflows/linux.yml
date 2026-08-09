@@ -72,12 +72,12 @@ jobs:
       - name: Test
         if: matrix.build-type == 'Debug'
         working-directory: mimir/build
-        run: cmake --build mimir/build -v --target test-all
+        run: cmake --build . -v --target test-all
 
       - name: Run lit test suite
         if: matrix.build-type == 'Release'
         working-directory: mimir/build
-        run: cmake --build mimir/build -v --target lit
+        run: cmake --build . -v --target lit
 
       - name: Test w/ Valgrind
         if: matrix.build-type == 'Release'
