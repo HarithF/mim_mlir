@@ -40,6 +40,12 @@ jobs:
           path: mimir/bin
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Verify FileCheck downloaded
+        shell: cmd
+        run: |
+          dir mimir\bin
+          mimir\bin\FileCheck-x86_64-win.exe --version
+
       - name: Configure
         shell: cmd
         run: |
