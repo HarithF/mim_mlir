@@ -54,7 +54,7 @@ jobs:
                 -DMIM_BUILD_EXAMPLES=ON                                   \
                 -DMIM_FILECHECK=${LLVM_PREFIX}/bin/FileCheck              \
                 -DMIM_LIT_TIMEOUT=300                                     \
-                -DPython3_EXECUTABLE=.venv/bin/python3
+                -DPython3_EXECUTABLE=$(pwd)/.venv/bin/python3
 
       - name: Build
         run: cmake --build mimir/build -v
