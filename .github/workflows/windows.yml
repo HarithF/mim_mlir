@@ -69,19 +69,13 @@ jobs:
           call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
           cmake --build mimir/build -v
           
-      - name: Reproduce pipe with confirmed path
-        shell: cmd
-        run: |
-          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
-          echo === Testing direct pipe ===
-          D:\a\mim_mlir\mim_mlir\mimir\build\bin\mim.exe -p opt D:\a\mim_mlir\mim_mlir\mimir\lit\core\icmp.mim -o - | "D:\a\mim_mlir\mim_mlir\mimir\bin\FileCheck-x86_64-win.exe" D:\a\mim_mlir\mim_mlir\mimir\lit\core\icmp.mim
-          echo Exit code: %ERRORLEVEL%
+
 
       - name: Test
         working-directory: mimir/build
         shell: cmd
         run: |
           call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
-          set LIT_USE_INTERNAL_SHELL=1
-          set PATH=%GITHUB_WORKSPACE%/mimir/bin;%PATH%
+          set LIT_USE_INTERNAL_SHELL=0
+          set PATH=%GITHUB_WORKSPACE%\mimir\bin;%PATH%
           cmake --build . -v --target test-all
