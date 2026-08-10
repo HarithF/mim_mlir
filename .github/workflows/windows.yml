@@ -27,7 +27,7 @@ jobs:
           path: mimir/extra/mlir
 
       - name: Patch lit.cfg.py to remove FileCheck quoting
-        shell: cmd
+        shell: pwsh
         run: |
           (Get-Content mimir/lit/lit.cfg.py) -replace `
             "config\.substitutions\.append\(\('%FileCheck', '\"\{\}\"'\.format\(config\.filecheck\)\)\)", `
