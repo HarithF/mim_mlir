@@ -29,11 +29,12 @@ jobs:
       - name: Patch lit.cfg.py to remove FileCheck quoting
         shell: pwsh
         run: |
-          (Get-Content mimir/lit/lit.cfg.py) -replace `
-            "config\.substitutions\.append\(\('%FileCheck', '\"\{\}\"'\.format\(config\.filecheck\)\)\)", `
-            "config.substitutions.append(('%FileCheck', config.filecheck))" | `
-            Set-Content mimir/lit/lit.cfg.py
-          Select-String -Path mimir/lit/lit.cfg.py -Pattern "FileCheck"
+           $content = Get-Content -Raw mimir/lit/lit.cfg.py
+           $old = "config.substitutions.append(('%FileCheck', '""{}""'.format(config.filecheck)))"
+           $new = "config.substitutions.append(('%FileCheck', config.filecheck))"
+           $content = $content.Replace($old, $new)
+           Set-Content -Path mimir/lit/lit.cfg.py -Value $content -NoNewline
+           Select-String -Path mimir/lit/lit.cfg.py -Pattern "FileCheck"
 
       - name: Install LIT
         shell: cmd
