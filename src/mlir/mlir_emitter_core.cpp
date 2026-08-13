@@ -47,6 +47,8 @@ void MLIREmitter::run() {
 
 void MLIREmitter::emit_func(Lam* lam, MLIRBlock& into) {
     values_.clear();
+    names_.clear();
+    used_names_.clear();
     name_counter_ = 0;
     curr_ret_var_ = lam->ret_var();
 
@@ -109,8 +111,10 @@ MLIRValue MLIREmitter::emit_def(const Def* def, MLIRBlock& into) {
 
         if (auto v = try_emit_tensor_op(app, into)) return *v;
 
+        auto [axm, curry, trip] = Axm::get(app);
         std::cerr << "unhandled App axiom: callee=" << app->callee()->node_name() << " sym='"
-                  << app->callee()->sym().str() << "'\n";
+                  << app->callee()->sym().str() << "' axm='" << (axm ? axm->sym().str() : "<none>")
+                  << "' curry=" << (int)curry << " type=" << app->type() << '\n';
         assert(false && "unhandled App in emit_def — missing try_emit_* case");
     }
 

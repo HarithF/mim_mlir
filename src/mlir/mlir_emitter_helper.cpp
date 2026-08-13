@@ -12,10 +12,26 @@
 namespace mim::mlir_be {
 
 // ----- Helpers -------
+/// Memoized per Def: call sites derive several SSA names from one Def (`%x`, `%x.buf`, `%x.buf.out`) and rely on
+/// the base staying stable across calls.
+/// Distinct Defs never share a name: Mim shadows freely (`let a = …; let a = …`), so the same Sym can name many
+/// Defs, and MLIR requires one definition per SSA name.
 std::string MLIREmitter::fresh_name(const Def* def) {
+    if (auto it = names_.find(def); it != names_.end()) return it->second;
+
+    std::string name;
     auto sym = def->sym().str();
-    if (!sym.empty() && sym[0] != '_') return "%" + sym;
-    return std::format("%v{}", name_counter_++);
+    if (!sym.empty() && sym[0] != '_') {
+        name = "%" + std::string(sym);
+        for (int i = 1; !used_names_.insert(name).second; ++i) name = std::format("%{}_{}", sym, i);
+    } else {
+        // The counter already makes these unique.
+        name = std::format("%v{}", name_counter_++);
+        used_names_.insert(name);
+    }
+
+    names_[def] = name;
+    return name;
 }
 std::string MLIREmitter::fresh_name(std::string prefix) { return prefix + std::to_string(name_counter_++); }
 

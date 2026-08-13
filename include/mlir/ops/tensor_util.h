@@ -12,6 +12,7 @@
 #include <mim/plug/affine/affine.h>
 #include <mim/plug/affine/autogen.h>
 
+#include "mlir/ops/affine.h"
 #include "mlir/region_tree.h"
 
 namespace mim::mlir_be {
@@ -125,7 +126,18 @@ inline std::optional<size_t> find_driving_param(const Def* d, const std::vector<
     return found;
 }
 
-inline std ::string lam_to_affine_map(Lam* lam, size_t total_loops) {
+struct AffineMapInfo {
+    std::string str;
+    /// Loop dims this map exposes as a bare `d<j>`, i.e. not wrapped in any arithmetic.
+    /// `linalg.generic` recovers the loop nest by inverting the concatenated maps, so a dim that only ever occurs
+    /// inside an expression (`d2 * 2 + d4`) does not count as recovered.
+    std::vector<size_t> bare_dims;
+};
+
+/// Renders a `%tensor.map_reduce` access lam as an MLIR `affine_map` over @p total_loops loop dims.
+/// @p loop_extents bounds those dims (see AffineExtents); it lets the affine folder discard the `mod`/`floordiv`
+/// terms that the loop domain makes redundant.
+inline AffineMapInfo lam_to_affine_map(Lam* lam, size_t total_loops, const AffineExtents& loop_extents) {
     assert(lam && lam->is_set());
 
     // infer actual param count
@@ -154,51 +166,45 @@ inline std ::string lam_to_affine_map(Lam* lam, size_t total_loops) {
     const Def* result_def = lam->body();
     assert(result_def);
 
-    std::string result_str;
-
+    // One output position per input axis; a lam returning a bare index has exactly one.
     std::vector<const Def*> results;
-    bool is_direct_param = false;
-    for (size_t j = 0; j < params.size(); ++j) {
-        if (result_def == params[j]) {
-            result_str += std::format("d{}", j);
-            is_direct_param = true;
-            break;
-        }
+    if (auto sigma = result_def->type()->isa<Sigma>()) {
+        size_t n = sigma->num_ops();
+        for (size_t i = 0; i < n; ++i)
+            results.push_back(result_def->proj(n, i));
+    } else if (auto arr = result_def->type()->isa<Arr>()) {
+        if (auto n = Lit::isa(arr->arity()))
+            for (size_t i = 0; i < *n; ++i)
+                results.push_back(result_def->proj(*n, i));
+    } else {
+        results.push_back(result_def);
     }
-    if (!is_direct_param) {
-        // unpack as tuple/sigma/arr
-        if (auto sigma = result_def->type()->isa<Sigma>()) {
-            size_t n = sigma->num_ops();
-            for (size_t i = 0; i < n; ++i)
-                results.push_back(result_def->proj(n, i));
-        } else if (auto arr = result_def->type()->isa<Arr>()) {
-            if (auto n = Lit::isa(arr->arity()))
-                for (size_t i = 0; i < *n; ++i)
-                    results.push_back(result_def->proj(*n, i));
+
+    std::string result_str;
+    std::vector<size_t> bare_dims;
+    for (size_t i = 0; i < results.size(); ++i) {
+        if (i) result_str += ", ";
+
+        if (auto e = affine_expr(results[i], params, loop_extents)) {
+            result_str += e->str();
+            if (auto d = std::get_if<AffineDim>(&e->expr)) bare_dims.push_back(d->pos);
+            continue;
+        }
+
+        // Outside the affine grammar. Fall back to the old "which single loop var drives this position" guess, which
+        // is right for pure projections and broadcasts but silently wrong for anything with real index arithmetic —
+        // so say so rather than emitting a plausible-looking map.
+        std::cerr << "mlir: cannot render access map position " << i << " of '" << lam->sym().str()
+                  << "' as an affine expression; falling back to a driving-parameter guess\n";
+        if (auto j = find_driving_param(results[i], params)) {
+            result_str += std::format("d{}", *j);
+            bare_dims.push_back(*j);
         } else {
-            results.push_back(result_def);
-        }
-
-        for (size_t i = 0; i < results.size(); ++i) {
-            if (i) result_str += ", ";
-            bool found = false;
-            for (size_t j = 0; j < params.size(); ++j) {
-                if (results[i] == params[j]) {
-                    result_str += std::format("d{}", j);
-                    found = true;
-                    break;
-                }
-            }
-            if (!found) {
-                if (auto j = find_driving_param(results[i], params))
-                    result_str += std::format("d{}", *j);
-                else
-                    result_str += "0"; // genuine broadcast dim
-            }
+            result_str += "0";
         }
     }
 
-    return std::format("affine_map<({}) -> ({})>", dim_str, result_str);
+    return {std::format("affine_map<({}) -> ({})>", dim_str, result_str), std::move(bare_dims)};
 }
 
 } // namespace mim::mlir_be

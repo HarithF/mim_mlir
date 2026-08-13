@@ -9,6 +9,7 @@ add_mim_plugin(mlir
     SOURCES
         src/mlir.cpp
         src/normalizers.cpp
+        src/mlir/affine.cpp
         src/mlir/lam_classifier.cpp
         src/mlir/mlir_emitter_core.cpp
         src/mlir/mlir_emitter_helper.cpp

@@ -1,4 +1,6 @@
+#include <algorithm>
 #include <functional>
+#include <ranges>
 
 #include <mim/lam.h>
 #include <mim/tuple.h>
@@ -42,6 +44,35 @@ std::optional<MLIRValue> MLIREmitter::try_emit_tensor_op(const App* app, MLIRBlo
 
         if (!std::holds_alternative<MLIRTensorType>(in_val.type)) in_val = wrap_as_tensor(input, in_val, into);
 
+        // `linalg.broadcast` treats `dimensions` as the *added* axes, so it wants the input without them
+        // (input rank + dimensions == init rank). %tensor.broadcast instead preserves rank, and whether the size-1
+        // axes are physically present depends on the source: `%tensor.broadcast ((1, 32), (4, 32), b)` may be given a
+        // rank-1 `b: «32; T»`, or a rank-2 one that was %tensor.reshape'd to «1, 32; T» first. Collapse them away
+        // when they are there.
+        if (auto tt = std::get_if<MLIRTensorType>(&in_val.type);
+            tt && tt->shape.size() == r_nat && !bcast_dims.empty()) {
+            // One group per kept axis, absorbing the unit axes to its left; the last group also takes the trailing
+            // ones. Groups must be contiguous, and each contributes `∏ extents` — i.e. the kept extent — to the result.
+            std::vector<std::vector<int64_t>> reassoc;
+            MLIRTensorType collapsed;
+            collapsed.elem = tt->elem;
+            for (size_t i = 0; i < r_nat; ++i) {
+                if (reassoc.empty()) reassoc.emplace_back();
+                reassoc.back().push_back(static_cast<int64_t>(i));
+                // A kept axis closes its group, unless no kept axis follows.
+                if (std::ranges::find(bcast_dims, static_cast<int64_t>(i)) == bcast_dims.end()) {
+                    collapsed.shape.push_back(tt->shape[i]);
+                    if (collapsed.shape.size() < r_nat - bcast_dims.size()) reassoc.emplace_back();
+                }
+            }
+            // All axes are size 1: the whole thing collapses to a rank-0 tensor, spelled with no groups.
+            if (collapsed.shape.empty()) reassoc.clear();
+
+            MLIRValue collapsed_val{fresh_name(def) + ".collapsed", MLIRType{std::move(collapsed)}};
+            into.ops.emplace_back(std::make_unique<TensorCollapseShapeOp>(collapsed_val, in_val, std::move(reassoc)));
+            in_val = collapsed_val;
+        }
+
         // tensor.empty for output buffer
         std::string buf_name = fresh_name(def) + ".buf";
         MLIRValue out_buf{buf_name, out_type};
@@ -51,6 +82,46 @@ std::optional<MLIRValue> MLIREmitter::try_emit_tensor_op(const App* app, MLIRBlo
         into.ops.emplace_back(std::make_unique<LinalgBroadcastOp>(result, in_val, out_buf, std::move(bcast_dims)));
         return result;
     }
+    if (auto pd = Axm::isa<plug::tensor::pad>(app)) {
+        // %tensor.pad @(T, r) s_in (mode, lo, hi) (input, value)
+        auto [input, value] = pd->args<2>();
+        auto* lohi_app      = pd->callee()->as<App>();
+        auto [mode, lo, hi] = lohi_app->args<3>();
+        auto [T, r]         = lohi_app->callee()->as<App>()->callee()->as<App>()->args<2>();
+
+        auto mode_lit = Lit::isa(mode);
+        assert(mode_lit && "pad mode must be literal");
+        // `tensor.pad` fills the halo from its region, which cannot express a per-axis clamped read.
+        assert(*mode_lit == 0 && "only constant padding (mode 0) is supported by the MLIR backend");
+
+        auto r_lit = Lit::isa(r);
+        assert(r_lit && "pad rank must be literal");
+        auto r_nat = *r_lit;
+
+        auto extents = [&](const Def* d) {
+            std::vector<int64_t> xs;
+            for (size_t i = 0; i < r_nat; ++i) {
+                auto lit = Lit::isa(r_nat == 1 ? d : d->proj(r_nat, i));
+                assert(lit && "pad amounts must be literal");
+                xs.push_back(static_cast<int64_t>(*lit));
+            }
+            return xs;
+        };
+
+        auto in_val = get_or_emit(input, into);
+        if (!std::holds_alternative<MLIRTensorType>(in_val.type)) in_val = wrap_as_tensor(input, in_val, into);
+        auto val_val = get_or_emit(value, into);
+
+        // The pad region is not isolated from above, so its block args live in the function's SSA namespace.
+        std::vector<std::string> block_args;
+        for (size_t i = 0; i < r_nat; ++i) block_args.push_back(fresh_name("%pad_i"));
+
+        MLIRValue result{fresh_name(def), types_.convert(def->type())};
+        into.ops.emplace_back(
+            std::make_unique<TensorPadOp>(result, in_val, val_val, extents(lo), extents(hi), std::move(block_args)));
+        return result;
+    }
+
     if (auto get_ax = Axm::isa<plug::tensor::get>(app)) {
         // %tensor.get @(T, r, s) (arr, index)
 
@@ -133,6 +204,18 @@ void MLIREmitter::emit_linalg_generic(const App* app, MLIRBlock& into) {
     auto* map_out = map_out_def->isa_mut<Lam>();
     assert(map_out);
 
+    // ── Loop extents from Sr ──────────────────────────────────────────────
+    // `Sr` gives the bounds of all ro + rr loops. The affine folder uses them to drop `mod`/`floordiv` terms the
+    // loop domain makes redundant, which is what keeps every loop dim recoverable from the emitted maps.
+    AffineExtents loop_extents;
+    for (size_t i = 0; i < total_loops; ++i) {
+        auto dim = total_loops == 1 ? Sr : Sr->proj(total_loops, i);
+        if (auto lit = Lit::isa(dim))
+            loop_extents.push_back(static_cast<int64_t>(*lit));
+        else
+            loop_extents.push_back(std::nullopt);
+    }
+
     // ── Result type from So and To ────────────────────────────────────────
     std::vector<std::optional<int64_t>> res_shape;
     for (size_t i = 0; i < ro; ++i) {
@@ -162,9 +245,49 @@ void MLIREmitter::emit_linalg_generic(const App* app, MLIRBlock& into) {
     // ── Affine maps from access lams ──────────────────────────────────────
 
     std::vector<std::string> indexing_maps;
+    std::vector<size_t> bare_dims;
+    auto add_map = [&](const AffineMapInfo& info) {
+        indexing_maps.push_back(info.str);
+        for (auto d : info.bare_dims)
+            if (std::ranges::find(bare_dims, d) == bare_dims.end()) bare_dims.push_back(d);
+    };
+
     for (size_t i = 0; i < n_inputs; ++i)
-        indexing_maps.push_back(lam_to_affine_map(proj_map_lam(i), total_loops));
-    indexing_maps.push_back(lam_to_affine_map(map_out, total_loops));
+        add_map(lam_to_affine_map(proj_map_lam(i), total_loops, loop_extents));
+    auto out_map = lam_to_affine_map(map_out, total_loops, loop_extents);
+    add_map(out_map);
+
+    // ── Shape-only operand for loop dims no map exposes ───────────────────
+    // `linalg.generic` inverts the concatenated maps to recover the loop nest, so a dim occurring only inside index
+    // arithmetic (a window offset like `d2 * 2 + d4`) leaves the op unverifiable. MLIR's own `linalg.pooling_*` ops
+    // solve this by taking the kernel as a shape-only `ins` operand; %tensor.pool has no such operand (the window is
+    // a literal), so synthesize one. Its element is never read — it exists purely to name the dims.
+    std::vector<size_t> missing;
+    for (size_t i = 0; i < total_loops; ++i)
+        if (std::ranges::find(bare_dims, i) == bare_dims.end()) missing.push_back(i);
+
+    std::optional<MLIRValue> shape_arg;
+    if (!missing.empty()) {
+        MLIRTensorType shape_tensor;
+        shape_tensor.elem = std::make_shared<MLIRTypeNode>(res_elem_type);
+        std::string dims;
+        for (size_t i = 0; i < missing.size(); ++i) {
+            shape_tensor.shape.push_back(loop_extents[missing[i]]);
+            dims += (i ? ", " : "") + std::format("d{}", missing[i]);
+        }
+
+        MLIRValue shape_buf{fresh_name(app) + ".shape", MLIRType{std::move(shape_tensor)}};
+        into.ops.emplace_back(std::make_unique<TensorEmptyOp>(shape_buf));
+        ins.push_back(shape_buf);
+
+        // Slot the map in ahead of the output map: `indexing_maps` must follow ins-then-outs order.
+        std::string dim_str;
+        for (size_t i = 0; i < total_loops; ++i) dim_str += (i ? ", " : "") + std::format("d{}", i);
+        indexing_maps.back() = std::format("affine_map<({}) -> ({})>", dim_str, dims);
+        indexing_maps.push_back(out_map.str);
+
+        shape_arg = MLIRValue{fresh_name("%shape_"), res_elem_type};
+    }
 
     // ── Iterator types ────────────────────────────────────────────────────
     std::vector<std::string> iterator_types;
@@ -258,6 +381,9 @@ void MLIREmitter::emit_linalg_generic(const App* app, MLIRBlock& into) {
         put(arg_path, acc_val);
     }
 
+    // Between the real inputs and the accumulator, matching the ins-then-outs block-arg order.
+    if (shape_arg) body_args.push_back(*shape_arg);
+
     if (have_acc) body_args.push_back(acc_val);
 
     auto type_arity = [](const Def* t) -> size_t {
@@ -288,8 +414,12 @@ void MLIREmitter::emit_linalg_generic(const App* app, MLIRBlock& into) {
     std::vector<const Def*> body_added;
     for (auto& [d, _] : values_)
         if (!pre_body_keys.contains(d)) body_added.push_back(d);
-    for (auto* d : body_added)
+    for (auto* d : body_added) {
         values_.erase(d);
+        // Drop the memoized name too: the Def has to be re-emitted in the next body that needs it, and that
+        // second definition needs a name of its own. `used_names_` keeps the old one reserved.
+        names_.erase(d);
+    }
 
     values_[app] = op->result();
     into.ops.emplace_back(op);
