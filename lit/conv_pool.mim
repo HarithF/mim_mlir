@@ -1,0 +1,37 @@
+// RUN: rm -rf %t && mkdir -p %t && cd %t && %mim -p mlir %s && %FileCheck %s < %{s:stem}.mlir
+
+// The %tensor ops whose lowered read maps need real affine arithmetic, rather than "one loop var per output
+// position": %tensor.conv and %tensor.pool read a strided window, %tensor.reshape reads a delinearized linear index,
+// and a full-rank %tensor.broadcast has to shed its size-1 axes before linalg.broadcast will take it.
+
+plugin tensor;
+plugin math;
+
+let f32 = %math.f32;
+let F32 = %math.F32;
+
+let R: %tensor.Ring = (F32, 0:F32, %math.arith.add @f32 0, %math.arith.mul @f32 0);
+
+let add     = %math.arith.add @f32 0;
+let fmax    = %math.extrema.fmax @f32 0;
+let neg_inf = 0xFF800000:F32;
+
+// "same" 3x3 conv: stride 1, dilation 1, padding 1 keeps the 4x4 spatial size. The padding becomes a %tensor.pad,
+// and the windowed multiply-accumulate an affine read map over the 7 conv loops (n, co, oh, ow, ci, kh, kw).
+fun extern conv_same (x: «2, 2, 4, 4; F32», w: «3, 2, 3, 3; F32»): «2, 3, 4, 4; F32» =
+    return (%tensor.conv R ((1, 1), (1, 1), (1, 1)) (x, w));
+
+// 2x2 stride-2 max pool, no padding: 4x4 -> 2x2. The kernel loops (kh, kw) appear only inside the read map's
+// arithmetic, so the emitter has to add a shape-only operand to keep them recoverable.
+fun extern pool_max (x: «2, 2, 4, 4; F32»): «2, 2, 2, 2; F32» =
+    return (%tensor.pool (fmax, neg_inf) ((2, 2), (2, 2), (1, 1), (0, 0), (2, 2)) x);
+
+// Flatten: the read map is a row-major delinearize of the output's linear index.
+fun extern flatten (x: «2, 2, 4, 4; F32»): «2, 32; F32» =
+    return (%tensor.reshape (2, 2, 4, 4) (2, 32) x);
+
+// Per-channel bias, as the PyTorch importer emits it: reshape the bias to rank 4, then broadcast over NCHW. The
+// reshape materializes the size-1 axes, so the broadcast input arrives at full rank.
+fun extern bias_nchw (t: «2, 3, 4, 4; F32», bias: «3; F32»): «2, 3, 4, 4; F32» =
+    let bias4 = %tensor.broadcast ((1, 3, 1, 1), (2, 3, 4, 4), %tensor.reshape 3 (1, 3, 1, 1) bias);
+    return (%tensor.binary add @(4, (2, 3, 4, 4)) (t, bias4));
