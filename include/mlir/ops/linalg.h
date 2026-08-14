@@ -23,6 +23,18 @@ public:
     }
 };
 
+class LinalgFillOp : public MLIROp {
+public:
+    LinalgFillOp(MLIRValue result, MLIRValue value, MLIRValue out_buf)
+        : MLIROp({std::move(result)}, {std::move(value), std::move(out_buf)}) {}
+
+    void print(Printer& p) const override {
+        p.line("{} = linalg.fill ins({} : {}) outs({} : {}) -> {}", results_[0].name, operands_[0].name,
+               print_type(operands_[0].type), operands_[1].name, print_type(operands_[1].type),
+               print_type(results_[0].type));
+    }
+};
+
 class LinalgGenericOp : public MLIROp {
 public:
     LinalgGenericOp(std::vector<MLIRValue> ins,

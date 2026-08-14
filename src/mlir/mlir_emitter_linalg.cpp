@@ -114,7 +114,8 @@ std::optional<MLIRValue> MLIREmitter::try_emit_tensor_op(const App* app, MLIRBlo
 
         // The pad region is not isolated from above, so its block args live in the function's SSA namespace.
         std::vector<std::string> block_args;
-        for (size_t i = 0; i < r_nat; ++i) block_args.push_back(fresh_name("%pad_i"));
+        for (size_t i = 0; i < r_nat; ++i)
+            block_args.push_back(fresh_name("%pad_i"));
 
         MLIRValue result{fresh_name(def), types_.convert(def->type())};
         into.ops.emplace_back(
@@ -237,9 +238,19 @@ void MLIREmitter::emit_linalg_generic(const App* app, MLIRBlock& into) {
         ins.push_back(get_or_emit(proj_input(i), into));
 
     // ── Output buffer ─────────────────────────────────────────────────────
-    std::string buf_name = fresh_name(app) + ".buf";
-    MLIRValue out_buf{buf_name, res_type};
+
+    auto base       = fresh_name(app);
+    auto needs_init = !zero->isa<Bot>();
+
+    MLIRValue out_buf{base + (needs_init ? ".empty" : ".buf"), res_type};
     into.ops.emplace_back(std::make_unique<TensorEmptyOp>(out_buf));
+
+    if (needs_init) {
+        auto init_val = get_or_emit(zero, into);
+        MLIRValue filled{base + ".buf", res_type};
+        into.ops.emplace_back(std::make_unique<LinalgFillOp>(filled, init_val, out_buf));
+        out_buf = std::move(filled);
+    }
     std::vector<MLIRValue> outs{out_buf};
 
     // ── Affine maps from access lams ──────────────────────────────────────
@@ -282,7 +293,8 @@ void MLIREmitter::emit_linalg_generic(const App* app, MLIRBlock& into) {
 
         // Slot the map in ahead of the output map: `indexing_maps` must follow ins-then-outs order.
         std::string dim_str;
-        for (size_t i = 0; i < total_loops; ++i) dim_str += (i ? ", " : "") + std::format("d{}", i);
+        for (size_t i = 0; i < total_loops; ++i)
+            dim_str += (i ? ", " : "") + std::format("d{}", i);
         indexing_maps.back() = std::format("affine_map<({}) -> ({})>", dim_str, dims);
         indexing_maps.push_back(out_map.str);
 
