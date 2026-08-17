@@ -123,6 +123,31 @@ std::optional<MLIRValue> MLIREmitter::try_emit_tensor_op(const App* app, MLIRBlo
         return result;
     }
 
+    if (auto cat = Axm::isa<plug::tensor::concat>(app)) {
+        // %tensor.concat @(T, nis, r) ax @Sis is
+        auto [TnisR, ax, Sis] = cat->callee()->as<App>()->uncurry_args<3>();
+        auto [T, nis, r]      = TnisR->projs<3>();
+
+        auto nis_lit = Lit::isa(nis);
+        assert(nis_lit && "concat input count must be literal");
+        auto ax_lit = Lit::isa(ax);
+        assert(ax_lit && "concat axis must be literal");
+        auto n_inputs = *nis_lit;
+
+        // `tensor.concat` takes the inputs as a variadic operand list and derives the joined extent itself
+        std::vector<MLIRValue> ins;
+        for (size_t i = 0; i < n_inputs; ++i) {
+            auto* in    = n_inputs == 1 ? app->arg() : app->arg()->proj(n_inputs, i);
+            auto in_val = get_or_emit(in, into);
+            if (!std::holds_alternative<MLIRTensorType>(in_val.type)) in_val = wrap_as_tensor(in, in_val, into);
+            ins.push_back(std::move(in_val));
+        }
+
+        MLIRValue result{fresh_name(def), types_.convert(def->type())};
+        into.ops.emplace_back(std::make_unique<TensorConcatOp>(result, std::move(ins), static_cast<int64_t>(*ax_lit)));
+        return result;
+    }
+
     if (auto get_ax = Axm::isa<plug::tensor::get>(app)) {
         // %tensor.get @(T, r, s) (arr, index)
 

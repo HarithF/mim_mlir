@@ -23,7 +23,8 @@ public:
             std::vector<MLIRValue> ops;
             ops.reserve(1 + indices.size());
             ops.push_back(std::move(src));
-            for (auto& i : indices) ops.push_back(std::move(i));
+            for (auto& i : indices)
+                ops.push_back(std::move(i));
             return ops;
         }()) {}
 
@@ -50,7 +51,8 @@ public:
         std::string groups;
         for (size_t g = 0; g < reassoc_.size(); ++g) {
             groups += (g ? ", [" : "[");
-            for (size_t i = 0; i < reassoc_[g].size(); ++i) groups += (i ? ", " : "") + std::to_string(reassoc_[g][i]);
+            for (size_t i = 0; i < reassoc_[g].size(); ++i)
+                groups += (i ? ", " : "") + std::to_string(reassoc_[g][i]);
             groups += "]";
         }
         p.line("{} = tensor.collapse_shape {} [{}] : {} into {}", results_[0].name, operands_[0].name, groups,
@@ -59,6 +61,27 @@ public:
 
 private:
     std::vector<std::vector<int64_t>> reassoc_;
+};
+
+/// `%r = tensor.concat dim(d) %a, %b, … : (tensor<…>, tensor<…>, …) -> tensor<…>`.
+class TensorConcatOp : public MLIROp {
+public:
+    TensorConcatOp(MLIRValue result, std::vector<MLIRValue> ins, int64_t dim)
+        : MLIROp({std::move(result)}, std::move(ins))
+        , dim_(dim) {}
+
+    void print(Printer& p) const override {
+        std::string names, types;
+        for (auto& v : operands_) {
+            names += (names.empty() ? "" : ", ") + v.name;
+            types += (types.empty() ? "" : ", ") + print_type(v.type);
+        }
+        p.line("{} = tensor.concat dim({}) {} : ({}) -> {}", results_[0].name, dim_, names, types,
+               print_type(results_[0].type));
+    }
+
+private:
+    int64_t dim_;
 };
 
 /// `%r = tensor.pad %src low[…] high[…] { ^bb0(…): tensor.yield %v } : tensor<…> to tensor<…>`.
@@ -81,13 +104,15 @@ public:
     void print(Printer& p) const override {
         auto list = [](const std::vector<int64_t>& xs) {
             std::string s;
-            for (size_t i = 0; i < xs.size(); ++i) s += (i ? ", " : "") + std::to_string(xs[i]);
+            for (size_t i = 0; i < xs.size(); ++i)
+                s += (i ? ", " : "") + std::to_string(xs[i]);
             return s;
         };
 
         // One index-typed block arg per axis; unused here, but required by the op's region signature.
         std::string block_args;
-        for (size_t i = 0; i < block_args_.size(); ++i) block_args += (i ? ", " : "") + block_args_[i] + ": index";
+        for (size_t i = 0; i < block_args_.size(); ++i)
+            block_args += (i ? ", " : "") + block_args_[i] + ": index";
 
         p.line("{} = tensor.pad {} low[{}] high[{}] {{", results_[0].name, operands_[0].name, list(low_), list(high_));
         p.indent();
