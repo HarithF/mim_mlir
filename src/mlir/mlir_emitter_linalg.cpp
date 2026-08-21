@@ -17,7 +17,7 @@ namespace mim::mlir_be {
 std::optional<MLIRValue> MLIREmitter::try_emit_tensor_op(const App* app, MLIRBlock& into) {
     auto* def = app;
 
-    if (Axm::isa<plug::tensor::map_reduce>(app)) {
+    if (Axm::isa<plug::tensor::map_reduce_post>(app)) {
         emit_linalg_generic(app, into);
         return values_[def];
     }
@@ -149,10 +149,8 @@ std::optional<MLIRValue> MLIREmitter::try_emit_tensor_op(const App* app, MLIRBlo
     }
 
     if (auto get_ax = Axm::isa<plug::tensor::get>(app)) {
-        // %tensor.get @(T, r, s) (arr, index)
-
-        auto* arr_def = app->arg()->proj(2, 0);
-        auto* idx_def = app->arg()->proj(2, 1);
+        // %tensor.get @(T, r, s) (index, arr)
+        auto [idx_def, arr_def] = app->arg()->projs<2>();
 
         auto arr_val  = get_or_emit(arr_def, into);
         auto res_type = types_.convert(def->type());
@@ -187,15 +185,15 @@ std::optional<MLIRValue> MLIREmitter::try_emit_tensor_op(const App* app, MLIRBlo
     return std::nullopt;
 }
 void MLIREmitter::emit_linalg_generic(const App* app, MLIRBlock& into) {
-    // New currying chain (depth 8):
-    //   app0->arg = is          (inputs pack)
-    //   app1->arg = maps        (per-input access lams)
-    //   app2->arg = map_out     (output access lam)
-    //   app3->arg = (f, init)
-    //   app4->arg = (Tis,Ris,Sis) [skip, implicit type args]
-    //   app5->arg = (So, Sr)    (output shape, full loop bounds)
-    //   app6->arg = (To, Ro, Rr)
-    //   app7->arg = nis
+    // %tensor.map_reduce_post currying chain (depth 8):
+    //   app0->arg = (is, post_is)     (inputs pack, epilogue inputs pack)
+    //   app1->arg = (maps, post_maps) (per-input access lams, per-epilogue-input access lams)
+    //   app2->arg = map_out           (output access lam)
+    //   app3->arg = (f, init, post)
+    //   app4->arg = (Tis, Ris, Sis, Tps, Rps, Sps) [skip, implicit type args]
+    //   app5->arg = (So, Sr, sched)   (output shape, full loop bounds; sched drives the native lowering only)
+    //   app6->arg = (To, Tp, Ro, Rn, TSched)
+    //   app7->arg = (nis, nps)
     auto* app1 = app->callee()->as<App>();
     auto* app2 = app1->callee()->as<App>();
     auto* app3 = app2->callee()->as<App>();
@@ -204,22 +202,24 @@ void MLIREmitter::emit_linalg_generic(const App* app, MLIRBlock& into) {
     auto* app6 = app5->callee()->as<App>();
     auto* app7 = app6->callee()->as<App>();
 
-    auto* inputs_pack = app->arg();
-    auto* maps_pack   = app1->arg();
-    auto* map_out_def = app2->arg();
-    auto [comb, zero] = app3->arg()->projs<2>();
-    auto [So, Sr]     = app5->arg()->projs<2>();
-    auto [To, Ro, Rr] = app6->arg()->projs<3>();
-    auto* nis_def     = app7->arg();
+    auto [inputs_pack, post_inputs_pack] = app->arg()->projs<2>();
+    auto [maps_pack, post_maps_pack]     = app1->arg()->projs<2>();
+    auto* map_out_def                    = app2->arg();
+    auto [comb, zero, post]              = app3->arg()->projs<3>();
+    auto [So, Sr, sched]                 = app5->arg()->projs<3>();
+    auto [To, Tp, Ro, Rn, TSched]        = app6->arg()->projs<5>();
+    auto [nis_def, nps_def]              = app7->arg()->projs<2>();
+    (void)sched, (void)TSched; // the schedule chooser only steers the native (ll) lowering
 
     auto nis_opt = Lit::isa(nis_def);
+    auto nps_opt = Lit::isa(nps_def);
     auto Ro_opt  = Lit::isa(Ro);
-    auto Rr_opt  = Lit::isa(Rr);
-    assert(nis_opt && Ro_opt && Rr_opt);
+    auto Rn_opt  = Lit::isa(Rn);
+    assert(nis_opt && nps_opt && Ro_opt && Rn_opt);
     size_t n_inputs    = *nis_opt;
+    size_t n_post      = *nps_opt;
     size_t ro          = *Ro_opt;
-    size_t rr          = *Rr_opt;
-    size_t total_loops = ro + rr;
+    size_t total_loops = *Rn_opt;
 
     auto proj_input
         = [&](size_t i) -> const Def* { return n_inputs == 1 ? inputs_pack : inputs_pack->proj(n_inputs, i); };
@@ -229,6 +229,25 @@ void MLIREmitter::emit_linalg_generic(const App* app, MLIRBlock& into) {
     };
     auto* map_out = map_out_def->isa_mut<Lam>();
     assert(map_out);
+
+    // ── Collapsed input axes ──────────────────────────────────────────────
+    // A literal size-1 axis collapses out of a tensor's (nested array) type («1, n; T» IS «n; T»), so
+    // the converted MLIR operand is missing it — but a fused (read-through) access map still yields a
+    // coordinate for it. Mask those result positions out so map rank and operand rank agree.
+    auto [Tis, Ris, Sis, Tps, Rps, Sps] = app4->arg()->projs<6>();
+    (void)Tis, (void)Ris, (void)Tps, (void)Rps;
+    auto collapsed_axes = [](const Def* shape) -> std::optional<std::vector<bool>> {
+        auto rank = Lit::isa(shape->arity());
+        if (!rank) return std::nullopt;
+        std::vector<bool> keep(*rank, true);
+        bool any = false;
+        for (size_t d = 0; d < *rank; ++d) {
+            auto extent = Lit::isa(*rank == 1 ? shape : shape->proj(*rank, d));
+            if (extent && *extent == 1) keep[d] = false, any = true;
+        }
+        if (!any) return std::nullopt;
+        return keep;
+    };
 
     // ── Loop extents from Sr ──────────────────────────────────────────────
     // `Sr` gives the bounds of all ro + rr loops. The affine folder uses them to drop `mod`/`floordiv` terms the
@@ -242,14 +261,39 @@ void MLIREmitter::emit_linalg_generic(const App* app, MLIRBlock& into) {
             loop_extents.push_back(std::nullopt);
     }
 
+    // ── Drop unit-extent loop dims ────────────────────────────────────────
+    // The neutral tile of the schedule selectors is a strip-mine by 1, which leaves size-1 axes in
+    // the domain. The native lowering folds them away, and so does this backend: such a loop runs
+    // exactly once, so every use of its dim reads as 0 and the dim itself can go.
+    std::vector<std::optional<size_t>> dim_map(total_loops);
+    size_t n_kept = 0, ro_kept = 0;
+    for (size_t i = 0; i < total_loops; ++i) {
+        bool drop = loop_extents[i] && *loop_extents[i] == 1;
+        if (!drop) {
+            dim_map[i] = n_kept++;
+            if (i < ro) ++ro_kept;
+        }
+    }
+    auto* dim_map_p = n_kept == total_loops ? nullptr : &dim_map;
+
+    AffineExtents kept_extents;
+    for (size_t i = 0; i < total_loops; ++i)
+        if (dim_map[i]) kept_extents.push_back(loop_extents[i]);
+    size_t n_loops = n_kept;
+    size_t rr_kept = n_loops - ro_kept;
+
     // ── Result type from So and To ────────────────────────────────────────
+    // Literal size-1 axes of `So` collapse out of the result's (nested array) type, so they must
+    // collapse out of the emitted tensor type and the write map as well.
+    auto out_keep = collapsed_axes(So);
+    AffineExtents so_extents; // per original output axis, for rendering the post access maps
     std::vector<std::optional<int64_t>> res_shape;
     for (size_t i = 0; i < ro; ++i) {
         auto dim = ro == 1 ? So : So->proj(ro, i);
-        if (auto lit = Lit::isa(dim))
-            res_shape.push_back(static_cast<int64_t>(*lit));
-        else
-            res_shape.push_back(std::nullopt);
+        auto lit = Lit::isa(dim);
+        auto ext = lit ? std::optional<int64_t>(static_cast<int64_t>(*lit)) : std::nullopt;
+        so_extents.push_back(ext);
+        if (!out_keep || (*out_keep)[i]) res_shape.push_back(ext);
     }
     auto res_elem_type = types_.convert(To);
     MLIRTensorType res_tensor;
@@ -288,9 +332,12 @@ void MLIREmitter::emit_linalg_generic(const App* app, MLIRBlock& into) {
             if (std::ranges::find(bare_dims, d) == bare_dims.end()) bare_dims.push_back(d);
     };
 
-    for (size_t i = 0; i < n_inputs; ++i)
-        add_map(lam_to_affine_map(proj_map_lam(i), total_loops, loop_extents));
-    auto out_map = lam_to_affine_map(map_out, total_loops, loop_extents);
+    for (size_t i = 0; i < n_inputs; ++i) {
+        auto* S_i = n_inputs == 1 ? Sis : Sis->proj(n_inputs, i);
+        auto keep = collapsed_axes(S_i);
+        add_map(lam_to_affine_map(proj_map_lam(i), total_loops, loop_extents, dim_map_p, keep ? &*keep : nullptr));
+    }
+    auto out_map = lam_to_affine_map(map_out, total_loops, loop_extents, dim_map_p, out_keep ? &*out_keep : nullptr);
     add_map(out_map);
 
     // ── Shape-only operand for loop dims no map exposes ───────────────────
@@ -299,7 +346,7 @@ void MLIREmitter::emit_linalg_generic(const App* app, MLIRBlock& into) {
     // solve this by taking the kernel as a shape-only `ins` operand; %tensor.pool has no such operand (the window is
     // a literal), so synthesize one. Its element is never read — it exists purely to name the dims.
     std::vector<size_t> missing;
-    for (size_t i = 0; i < total_loops; ++i)
+    for (size_t i = 0; i < n_loops; ++i)
         if (std::ranges::find(bare_dims, i) == bare_dims.end()) missing.push_back(i);
 
     std::optional<MLIRValue> shape_arg;
@@ -308,7 +355,7 @@ void MLIREmitter::emit_linalg_generic(const App* app, MLIRBlock& into) {
         shape_tensor.elem = std::make_shared<MLIRTypeNode>(res_elem_type);
         std::string dims;
         for (size_t i = 0; i < missing.size(); ++i) {
-            shape_tensor.shape.push_back(loop_extents[missing[i]]);
+            shape_tensor.shape.push_back(kept_extents[missing[i]]);
             dims += (i ? ", " : "") + std::format("d{}", missing[i]);
         }
 
@@ -318,7 +365,7 @@ void MLIREmitter::emit_linalg_generic(const App* app, MLIRBlock& into) {
 
         // Slot the map in ahead of the output map: `indexing_maps` must follow ins-then-outs order.
         std::string dim_str;
-        for (size_t i = 0; i < total_loops; ++i)
+        for (size_t i = 0; i < n_loops; ++i)
             dim_str += (i ? ", " : "") + std::format("d{}", i);
         indexing_maps.back() = std::format("affine_map<({}) -> ({})>", dim_str, dims);
         indexing_maps.push_back(out_map.str);
@@ -328,17 +375,115 @@ void MLIREmitter::emit_linalg_generic(const App* app, MLIRBlock& into) {
 
     // ── Iterator types ────────────────────────────────────────────────────
     std::vector<std::string> iterator_types;
-    for (size_t i = 0; i < ro; ++i)
+    for (size_t i = 0; i < ro_kept; ++i)
         iterator_types.push_back("parallel");
-    for (size_t i = 0; i < rr; ++i)
+    for (size_t i = 0; i < rr_kept; ++i)
         iterator_types.push_back("reduction");
 
-    // ── Body seeding (unchanged — path-based strategy) ────────────────────
-    std::vector<MLIRValue> body_args;
+    // ── Body seeding (path-based strategy) ────────────────────────────────
     auto* body_lam = comb->isa_mut<Lam>();
+    auto plan      = plan_mr_body(body_lam);
 
-    auto* body_var     = body_lam->var();
-    auto body_var_type = body_var->type();
+    MLIRValue acc_val{fresh_name("%acc_"), res_elem_type};
+    plan.vals[plan.first_path] = acc_val;
+
+    std::vector<MLIRValue> body_args = plan.ins_args;
+    // Between the real inputs and the accumulator, matching the ins-then-outs block-arg order.
+    if (shape_arg) body_args.push_back(*shape_arg);
+    body_args.push_back(acc_val);
+
+    auto* op = new LinalgGenericOp(ins, outs, indexing_maps, iterator_types, body_args);
+    emit_mr_body(body_lam, plan.vals, op->body().entry());
+    into.ops.emplace_back(op);
+    MLIRValue result = op->result();
+
+    // ── Post epilogue ─────────────────────────────────────────────────────
+    // `%tensor.map_reduce` delegates to map_reduce_post with the neutral epilogue (a specialization
+    // of `%tensor.id` returning the folded accumulator unchanged) — recognize it structurally so no
+    // second generic is emitted for it.
+    auto* post_lam   = post->isa_mut<Lam>();
+    auto is_identity = [&]() -> bool {
+        if (n_post != 0) return false;
+        if (!post_lam || !post_lam->is_set()) return false;
+        auto* papp = post_lam->body()->isa<App>();
+        if (!papp || !is_return_callee(papp->callee(), post_lam->ret_var())) return false;
+        auto* x = post_lam->var()->proj(post_lam->num_vars(), 0);
+        // `x` is either the accumulator itself (flat dom) or the ([To, «0; …»], ret) pair whose
+        // first half is the accumulator.
+        return papp->arg() == x || (x->type()->isa<Sigma>() && papp->arg() == x->proj(2, 0));
+    };
+
+    if (!is_identity()) {
+        assert(post_lam && post_lam->is_set() && "stuck post epilogue not supported");
+
+        // `post` runs once per output cell, after the reduction is folded away: a second,
+        // parallel-only generic over the output domain. It reads the folded tensor at identity
+        // coordinates and each epilogue input through its post_map (output-cell → read coords).
+        // Its domain is the kept output axes; a collapsed unit axis reads as 0 in the post maps.
+        std::vector<std::optional<size_t>> post_dim_map(ro);
+        size_t ro_out = 0;
+        for (size_t i = 0; i < ro; ++i)
+            if (!out_keep || (*out_keep)[i]) post_dim_map[i] = ro_out++;
+        auto* post_dim_map_p = out_keep ? &post_dim_map : nullptr;
+
+        std::string id_dims;
+        for (size_t i = 0; i < ro_out; ++i)
+            id_dims += (i ? ", " : "") + std::format("d{}", i);
+        auto id_map = std::format("affine_map<({}) -> ({})>", id_dims, id_dims);
+
+        std::vector<std::string> post_idx_maps{id_map};
+        for (size_t j = 0; j < n_post; ++j) {
+            auto* d  = n_post == 1 ? post_maps_pack : post_maps_pack->proj(n_post, j);
+            auto* pm = d->isa_mut<Lam>();
+            assert(pm && "post access map must be a lam");
+            auto* S_j = n_post == 1 ? Sps : Sps->proj(n_post, j);
+            auto keep = collapsed_axes(S_j);
+            post_idx_maps.push_back(lam_to_affine_map(pm, ro, so_extents, post_dim_map_p, keep ? &*keep : nullptr).str);
+        }
+        post_idx_maps.push_back(id_map);
+
+        std::vector<MLIRValue> post_ins{result};
+        for (size_t j = 0; j < n_post; ++j) {
+            auto* d = n_post == 1 ? post_inputs_pack : post_inputs_pack->proj(n_post, j);
+            auto v  = get_or_emit(d, into);
+            if (!std::holds_alternative<MLIRTensorType>(v.type)) v = wrap_as_tensor(d, v, into);
+            post_ins.push_back(std::move(v));
+        }
+
+        auto post_elem_type = types_.convert(Tp);
+        MLIRTensorType post_tensor;
+        post_tensor.shape = res_shape;
+        post_tensor.elem  = std::make_shared<MLIRTypeNode>(post_elem_type);
+        MLIRType post_type{std::move(post_tensor)};
+
+        MLIRValue post_buf{base + ".post.buf", post_type};
+        into.ops.emplace_back(std::make_unique<TensorEmptyOp>(post_buf));
+
+        std::vector<std::string> post_iters(ro_out, "parallel");
+
+        auto post_plan = plan_mr_body(post_lam);
+        MLIRValue folded_arg{fresh_name("%acc_"), res_elem_type};
+        post_plan.vals[post_plan.first_path] = folded_arg;
+
+        // Block args: the folded cell first, then the epilogue inputs, then the (unread) out arg.
+        std::vector<MLIRValue> post_args{folded_arg};
+        post_args.insert(post_args.end(), post_plan.ins_args.begin(), post_plan.ins_args.end());
+        post_args.emplace_back(fresh_name("%out_"), post_elem_type);
+
+        auto* post_op = new LinalgGenericOp(post_ins, {post_buf}, post_idx_maps, post_iters, post_args);
+        emit_mr_body(post_lam, post_plan.vals, post_op->body().entry());
+        into.ops.emplace_back(post_op);
+        result = post_op->result();
+    }
+
+    values_[app] = result;
+}
+
+MLIREmitter::MRBodyPlan MLIREmitter::plan_mr_body(Lam* body_lam) {
+    assert(body_lam && body_lam->is_set());
+    MRBodyPlan plan;
+
+    auto body_var_type = body_lam->var()->type();
 
     std::vector<size_t> arg_path;
     const Def* arg_type = body_var_type;
@@ -352,11 +497,7 @@ void MLIREmitter::emit_linalg_generic(const App* app, MLIRBlock& into) {
         }
     }
 
-    std::map<std::vector<size_t>, MLIRValue> path_to_val;
-    MLIRValue acc_val;
-    bool have_acc = false;
-
-    auto put = [&](std::vector<size_t> p, MLIRValue v) { path_to_val[std::move(p)] = std::move(v); };
+    auto put = [&](std::vector<size_t> p, MLIRValue v) { plan.vals[std::move(p)] = std::move(v); };
 
     auto plan_ins = [&](const Def* ins_t, std::vector<size_t> ins_path) {
         if (auto s = ins_t->isa<Sigma>()) {
@@ -364,7 +505,7 @@ void MLIREmitter::emit_linalg_generic(const App* app, MLIRBlock& into) {
                 auto p = ins_path;
                 p.push_back(i);
                 MLIRValue v{fresh_name("%in_"), types_.convert(s->op(i))};
-                body_args.push_back(v);
+                plan.ins_args.push_back(v);
                 put(std::move(p), v);
             }
         } else if (auto a = ins_t->isa<Arr>()) {
@@ -373,56 +514,45 @@ void MLIREmitter::emit_linalg_generic(const App* app, MLIRBlock& into) {
                     auto p = ins_path;
                     p.push_back(i);
                     MLIRValue v{fresh_name("%in_"), types_.convert(a->body())};
-                    body_args.push_back(v);
+                    plan.ins_args.push_back(v);
                     put(std::move(p), v);
                 }
             }
         } else if (!ins_t->isa<Pi>()) {
             MLIRValue v{fresh_name("%in_"), types_.convert(ins_t)};
-            body_args.push_back(v);
+            plan.ins_args.push_back(v);
             put(std::move(ins_path), v);
         }
     };
 
     if (auto s = arg_type->isa<Sigma>()) {
-        // [acc, ins]
-        auto acc_p = arg_path;
-        acc_p.push_back(0);
+        // [first, ins]
+        auto first_p = arg_path;
+        first_p.push_back(0);
         auto ins_p = arg_path;
         ins_p.push_back(1);
         plan_ins(s->op(1), std::move(ins_p));
-        acc_val  = MLIRValue{fresh_name("%acc_"), res_elem_type};
-        have_acc = true;
-        put(std::move(acc_p), acc_val);
-    } else if (auto a = arg_type->isa<Arr>()) {
-        // «2; T» from a [T, «1; T»] singleton collapse: [acc, single_input]
-        if (auto n = Lit::isa(a->arity()); n && *n == 2) {
-            auto acc_p = arg_path;
-            acc_p.push_back(0);
-            auto ins_p = arg_path;
-            ins_p.push_back(1);
-            MLIRValue v{fresh_name("%in_"), types_.convert(a->body())};
-            body_args.push_back(v);
-            put(std::move(ins_p), v);
-            acc_val  = MLIRValue{fresh_name("%acc_"), res_elem_type};
-            have_acc = true;
-            put(std::move(acc_p), acc_val);
-        } else {
-            acc_val  = MLIRValue{fresh_name("%acc_"), res_elem_type};
-            have_acc = true;
-            put(arg_path, acc_val);
-        }
+        plan.first_path = std::move(first_p);
+    } else if (auto a = arg_type->isa<Arr>(); a && Lit::isa(a->arity()) && *Lit::isa(a->arity()) == 2) {
+        // «2; T» from a [T, «1; T»] singleton collapse: [first, single_input]
+        auto first_p = arg_path;
+        first_p.push_back(0);
+        auto ins_p = arg_path;
+        ins_p.push_back(1);
+        MLIRValue v{fresh_name("%in_"), types_.convert(a->body())};
+        plan.ins_args.push_back(v);
+        put(std::move(ins_p), v);
+        plan.first_path = std::move(first_p);
     } else {
-        acc_val  = MLIRValue{fresh_name("%acc_"), res_elem_type};
-        have_acc = true;
-        put(arg_path, acc_val);
+        plan.first_path = arg_path;
     }
 
-    // Between the real inputs and the accumulator, matching the ins-then-outs block-arg order.
-    if (shape_arg) body_args.push_back(*shape_arg);
+    return plan;
+}
 
-    if (have_acc) body_args.push_back(acc_val);
-
+void MLIREmitter::emit_mr_body(Lam* body_lam,
+                               const std::map<std::vector<size_t>, MLIRValue>& path_vals,
+                               MLIRBlock& body_bb) {
     auto type_arity = [](const Def* t) -> size_t {
         if (auto s = t->isa<Sigma>()) return s->num_ops();
         if (auto a = t->isa<Arr>())
@@ -439,14 +569,13 @@ void MLIREmitter::emit_linalg_generic(const App* app, MLIRBlock& into) {
         return cur;
     };
 
-    for (auto& [path, val] : path_to_val)
-        if (auto d = nav_path(body_var, path)) values_[d] = val;
+    for (auto& [path, val] : path_vals)
+        if (auto d = nav_path(body_lam->var(), path)) values_[d] = val;
     DefSet pre_body_keys;
     for (auto& [d, _] : values_)
         pre_body_keys.insert(d);
 
-    auto* op = new LinalgGenericOp(ins, outs, indexing_maps, iterator_types, body_args);
-    emit_linalg_body(body_lam, op->body().entry());
+    emit_linalg_body(body_lam, body_bb);
 
     std::vector<const Def*> body_added;
     for (auto& [d, _] : values_)
@@ -457,9 +586,6 @@ void MLIREmitter::emit_linalg_generic(const App* app, MLIRBlock& into) {
         // second definition needs a name of its own. `used_names_` keeps the old one reserved.
         names_.erase(d);
     }
-
-    values_[app] = op->result();
-    into.ops.emplace_back(op);
 }
 
 void MLIREmitter::emit_linalg_body(Lam* body_lam, MLIRBlock& body_bb) {

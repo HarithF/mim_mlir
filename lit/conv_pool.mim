@@ -35,3 +35,32 @@ fun extern flatten (x: «2, 2, 4, 4; F32»): «2, 32; F32» =
 fun extern bias_nchw (t: «2, 3, 4, 4; F32», bias: «3; F32»): «2, 3, 4, 4; F32» =
     let bias4 = %tensor.broadcast ((1, 3, 1, 1), (2, 3, 4, 4), %tensor.reshape 3 (1, 3, 1, 1) bias);
     return (%tensor.binary add @(4, (2, 3, 4, 4)) (t, bias4));
+
+// CHECK: module
+
+// The bias broadcast is fused into the read map: the rank-1 bias is read at (d1) directly, its
+// size-1 axes collapsed away — no linalg.broadcast, no materialized rank-4 bias.
+// CHECK-LABEL: func.func public @bias_nchw
+// CHECK: linalg.generic
+// CHECK-SAME: affine_map<(d0, d1, d2, d3) -> (d1)>
+// CHECK: arith.addf
+
+// CHECK-LABEL: func.func public @conv_same
+// CHECK: tensor.pad {{.*}} low[0, 0, 1, 1] high[0, 0, 1, 1]
+// CHECK: linalg.generic
+// CHECK-SAME: affine_map<(d0, d1, d2, d3, d4, d5, d6) -> (d0, d4, d2 + d5, d3 + d6)>
+// CHECK-SAME: affine_map<(d0, d1, d2, d3, d4, d5, d6) -> (d1, d4, d5, d6)>
+// CHECK-SAME: iterator_types = ["parallel", "parallel", "parallel", "parallel", "reduction", "reduction", "reduction"]
+// CHECK: arith.mulf
+// CHECK: arith.addf
+
+// CHECK-LABEL: func.func public @flatten
+// CHECK: linalg.generic
+// CHECK-SAME: affine_map<(d0, d1) -> (d0, d1 floordiv 16, d1 floordiv 4 mod 4, d1 mod 4)>
+
+// CHECK-LABEL: func.func public @pool_max
+// CHECK: linalg.fill
+// CHECK: linalg.generic
+// CHECK-SAME: affine_map<(d0, d1, d2, d3, d4, d5) -> (d0, d1, d2 * 2 + d4, d3 * 2 + d5)>
+// CHECK-SAME: iterator_types = ["parallel", "parallel", "parallel", "parallel", "reduction", "reduction"]
+// CHECK: arith.maxnumf

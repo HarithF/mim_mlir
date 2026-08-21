@@ -186,17 +186,17 @@ AffineExprRef aff_floordiv(AffineExprRef a, int64_t c, const AffineExtents& exte
         if (b->op == AffineBinOp::Mul)
             if (auto k = const_val(b->rhs); k && *k % c == 0) return aff_mul(b->lhs, *k / c);
 
-        // `(hi + lo) floordiv c → hi floordiv c` when `c` divides `hi` and `lo` cannot carry into it.
-        // This is what makes a delinearize-of-linearize round trip collapse back to the plain loop dim.
+        // `(x + m) floordiv c → x floordiv c + m floordiv c` when `c` divides `m`: an exact multiple
+        // passes through the floor untouched, whatever `x` contributes. Splitting (rather than
+        // requiring `x` to stay below `c`) peels a multi-stride linearization apart term by term,
+        // which is what makes a delinearize-of-linearize round trip collapse back to the plain loop dim.
         if (b->op == AffineBinOp::Add) {
             for (auto [even, rest] : {
                      std::pair{b->lhs, b->rhs},
                      std::pair{b->rhs, b->lhs}
-            }) {
-                if (!divides(*even, c)) continue;
-                auto rest_range = aff_range(rest, extents);
-                if (rest_range.lo >= 0 && rest_range.hi < c) return aff_floordiv(even, c, extents);
-            }
+            })
+                if (divides(*even, c))
+                    return aff_add(aff_floordiv(even, c, extents), aff_floordiv(rest, c, extents));
         }
     }
     return bin(AffineBinOp::FloorDiv, std::move(a), aff_const(c));
@@ -231,6 +231,37 @@ AffineExprRef aff_mod(AffineExprRef a, int64_t c, const AffineExtents& extents) 
             if (divides(*even, c)) return aff_mod(rest, c, extents);
     }
     return bin(AffineBinOp::Mod, std::move(a), aff_const(c));
+}
+
+AffineExprRef aff_renumber(const AffineExprRef& e, const std::vector<std::optional<size_t>>& dim_map,
+                           const AffineExtents& new_extents) {
+    if (auto d = std::get_if<AffineDim>(&e->expr)) {
+        if (d->pos < dim_map.size() && dim_map[d->pos]) return aff_dim(*dim_map[d->pos]);
+        return aff_const(0);
+    }
+    if (std::get_if<AffineConst>(&e->expr)) return e;
+
+    auto& b = std::get<AffineBin>(e->expr);
+    auto l  = aff_renumber(b.lhs, dim_map, new_extents);
+    auto r  = aff_renumber(b.rhs, dim_map, new_extents);
+    auto rc = const_val(r);
+    switch (b.op) {
+        case AffineBinOp::Add: return aff_add(std::move(l), std::move(r));
+        case AffineBinOp::Sub: return aff_sub(std::move(l), std::move(r));
+        case AffineBinOp::Mul:
+            if (rc) return aff_mul(std::move(l), *rc);
+            break;
+        case AffineBinOp::FloorDiv:
+            if (rc) return aff_floordiv(std::move(l), *rc, new_extents);
+            break;
+        case AffineBinOp::CeilDiv:
+            if (rc) return aff_ceildiv(std::move(l), *rc, new_extents);
+            break;
+        case AffineBinOp::Mod:
+            if (rc) return aff_mod(std::move(l), *rc, new_extents);
+            break;
+    }
+    return bin(b.op, std::move(l), std::move(r));
 }
 
 // ----- translation from %affine -----

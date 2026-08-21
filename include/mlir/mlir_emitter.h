@@ -1,4 +1,5 @@
 #pragma once
+#include <map>
 #include <optional>
 #include <ostream>
 #include <set>
@@ -70,6 +71,15 @@ private:
     std::optional<MLIRValue> try_emit_tensor_op(const App* app, MLIRBlock& into);
     void emit_linalg_generic(const App* mr_app, MLIRBlock& into);
     void emit_linalg_body(Lam* body_lam, MLIRBlock& body_bb);
+
+    /// Block-argument plan for a fold/epilogue body lam of shape `Fn [x, «n; ins»] → R`.
+    struct MRBodyPlan {
+        std::vector<MLIRValue> ins_args;               ///< one block arg per pack input, in order
+        std::vector<size_t> first_path;                ///< var path of `x` (fold: accumulator, epilogue: folded cell)
+        std::map<std::vector<size_t>, MLIRValue> vals; ///< var path → block arg (before `x` is added)
+    };
+    MRBodyPlan plan_mr_body(Lam* body_lam);
+    void emit_mr_body(Lam* body_lam, const std::map<std::vector<size_t>, MLIRValue>& path_vals, MLIRBlock& body_bb);
 
     World& world_;
     std::ostream& os_;

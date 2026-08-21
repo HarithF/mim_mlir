@@ -12,7 +12,7 @@ plugin tensor;
 
 axm %mlir.emit: %compile.Phase;
 
-lam extern _default_compile (): %compile.Phase =
+lam extern _compile (): %compile.Phase =
     %compile.phases ff (
       let optimize =
         %compile.phases tt (

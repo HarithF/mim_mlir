@@ -26,7 +26,7 @@ con extern main_tensor [arg0: «784; «1024; F32»», arg1: «1024; F32», arg2:
   let v_17 = F32_add @(2, (128, 10)) (v_14, v_16);
   let v_cst_0 = 0xFEC00000 : F32;
 
-  let v_18 = %tensor.map_reduce @1 @(F32, 1, 1)
+  let v_18 = %tensor.map_reduce @1 @(F32, 1, 2)
              ((128,), (128, 10))
              @(F32, 2, (128, 10))
              (max_fun, v_cst_0)
@@ -38,10 +38,21 @@ con extern main_tensor [arg0: «784; «1024; F32»», arg1: «1024; F32», arg2:
 // CHECK: module
 // CHECK: func.func public @main_tensor
 // CHECK: tensor<784x1024xf32>
+
+// The contraction is register-blocked by the dot schedule: k = 784 is strip-mined into 196 x 4.
 // CHECK: linalg.generic
-// CHECK: affine_map<(d0, d1, d2) -> (d0, d2)>
-// CHECK: linalg.broadcast
-// CHECK: dimensions = [0]
+// CHECK-SAME: affine_map<(d0, d1, d2, d3) -> (d0, d2 * 4 + d3)>
+// CHECK-SAME: iterator_types = ["parallel", "parallel", "reduction", "reduction"]
+// CHECK: arith.mulf
+// CHECK: arith.addf
+
+// The broadcast bias add and the tanh are fused into the map_reduce epilogue: a parallel-only
+// generic over the output cells that reads the rank-1 bias at (d1) — no linalg.broadcast.
+// CHECK: linalg.generic
+// CHECK-SAME: affine_map<(d0, d1) -> (d1)>
+// CHECK-SAME: iterator_types = ["parallel", "parallel"]
+// CHECK: arith.addf
 // CHECK: math.tanh
+
 // CHECK: arith.maximumf
 // CHECK: func.return {{.*}} tensor<128xf32>

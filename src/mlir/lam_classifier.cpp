@@ -21,13 +21,18 @@ const Def* LamClassifier::rewrite_imm_App(const App* app) {
         if (auto lam = body->isa_mut<Lam>()) results_[lam] = LamKind::AffineForBody;
         if (auto lam = exit->isa_mut<Lam>()) results_[lam] = LamKind::AffineForExit;
     }
-    // %tensor.map_reduce
-    if (Axm::isa<plug::tensor::map_reduce>(app)) {
-        auto* app1        = app->callee()->as<App>();  // maps (per-input access lams)
-        auto* app2        = app1->callee()->as<App>(); // map_out
-        auto* app3        = app2->callee()->as<App>(); // (comb, zero)
-        auto [comb, zero] = app3->arg()->projs<2>();
+    // %tensor.map_reduce_post
+    if (Axm::isa<plug::tensor::map_reduce_post>(app)) {
+        auto* app1              = app->callee()->as<App>();  // (maps, post_maps)
+        auto* app2              = app1->callee()->as<App>(); // map_out
+        auto* app3              = app2->callee()->as<App>(); // (comb, zero, post)
+        auto [comb, zero, post] = app3->arg()->projs<3>();
         if (auto lam = comb->isa_mut<Lam>()) {
+            results_[lam]         = LamKind::MapReduceBody;
+            map_reduce_apps_[lam] = app;
+        }
+        // The post epilogue is a CPS fun as well; keep it out of the top-level func.func set.
+        if (auto lam = post->isa_mut<Lam>()) {
             results_[lam]         = LamKind::MapReduceBody;
             map_reduce_apps_[lam] = app;
         }

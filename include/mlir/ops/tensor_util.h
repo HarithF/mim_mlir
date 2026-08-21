@@ -134,10 +134,18 @@ struct AffineMapInfo {
     std::vector<size_t> bare_dims;
 };
 
-/// Renders a `%tensor.map_reduce` access lam as an MLIR `affine_map` over @p total_loops loop dims.
+/// Renders a `%tensor.map_reduce_post` access lam as an MLIR `affine_map` over @p total_loops loop dims.
 /// @p loop_extents bounds those dims (see AffineExtents); it lets the affine folder discard the `mod`/`floordiv`
 /// terms that the loop domain makes redundant.
-inline AffineMapInfo lam_to_affine_map(Lam* lam, size_t total_loops, const AffineExtents& loop_extents) {
+/// @p dim_map, when given, renumbers the loop dims of the rendered map (see aff_renumber): the map's
+/// dim list holds only the kept dims, and a dropped (unit-extent) dim reads as the constant 0.
+/// @p keep_results, when given, drops the map's result positions marked `false`: a literal size-1 axis
+/// collapses out of the operand's (nested array) type, so its read coordinate must not be rendered.
+inline AffineMapInfo lam_to_affine_map(Lam* lam,
+                                       size_t total_loops,
+                                       const AffineExtents& loop_extents,
+                                       const std::vector<std::optional<size_t>>* dim_map = nullptr,
+                                       const std::vector<bool>* keep_results             = nullptr) {
     assert(lam && lam->is_set());
 
     // infer actual param count
@@ -150,9 +158,20 @@ inline AffineMapInfo lam_to_affine_map(Lam* lam, size_t total_loops, const Affin
     else
         actual_params = 1;
 
-    // dim string uses total_loops
+    // the rendered map runs over the kept dims only
+    size_t n_dims = total_loops;
+    AffineExtents kept_extents;
+    if (dim_map) {
+        n_dims = 0;
+        for (size_t i = 0; i < total_loops; ++i)
+            if ((*dim_map)[i]) ++n_dims;
+        kept_extents.resize(n_dims);
+        for (size_t i = 0; i < total_loops; ++i)
+            if ((*dim_map)[i]) kept_extents[*(*dim_map)[i]] = loop_extents[i];
+    }
+
     std::string dim_str;
-    for (size_t i = 0; i < total_loops; ++i)
+    for (size_t i = 0; i < n_dims; ++i)
         dim_str += (i ? ", " : "") + std::format("d{}", i);
 
     // collect actual params using actual_params
@@ -182,10 +201,13 @@ inline AffineMapInfo lam_to_affine_map(Lam* lam, size_t total_loops, const Affin
 
     std::string result_str;
     std::vector<size_t> bare_dims;
+    size_t n_emitted = 0;
     for (size_t i = 0; i < results.size(); ++i) {
-        if (i) result_str += ", ";
+        if (keep_results && i < keep_results->size() && !(*keep_results)[i]) continue;
+        if (n_emitted++) result_str += ", ";
 
         if (auto e = affine_expr(results[i], params, loop_extents)) {
+            if (dim_map) e = aff_renumber(e, *dim_map, kept_extents);
             result_str += e->str();
             if (auto d = std::get_if<AffineDim>(&e->expr)) bare_dims.push_back(d->pos);
             continue;
@@ -197,8 +219,13 @@ inline AffineMapInfo lam_to_affine_map(Lam* lam, size_t total_loops, const Affin
         std::cerr << "mlir: cannot render access map position " << i << " of '" << lam->sym().str()
                   << "' as an affine expression; falling back to a driving-parameter guess\n";
         if (auto j = find_driving_param(results[i], params)) {
-            result_str += std::format("d{}", *j);
-            bare_dims.push_back(*j);
+            auto pos = dim_map ? (*dim_map)[*j] : std::optional<size_t>(*j);
+            if (pos) {
+                result_str += std::format("d{}", *pos);
+                bare_dims.push_back(*pos);
+            } else {
+                result_str += "0";
+            }
         } else {
             result_str += "0";
         }
