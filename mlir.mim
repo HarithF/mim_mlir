@@ -22,7 +22,7 @@ lam extern _compile (): %compile.Phase =
                 %compile.eta_conv,
             ),
             %compile.named "%mem.seo",
-            %compile.tail_rec_elim,
+            %compile.static_arg_opt,
         );
 
         optimize,
