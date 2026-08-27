@@ -26,7 +26,7 @@ con extern main_tensor [arg0: «784; «1024; F32»», arg1: «1024; F32», arg2:
   let v_17 = F32_add @(2, (128, 10)) (v_14, v_16);
   let v_cst_0 = 0xFEC00000 : F32;
 
-  let v_18 = %tensor.map_reduce @1 @(F32, 1, 1)
+  let v_18 = %tensor.map_reduce @1 @(F32, 1, 2)
              ((128,), (128, 10))
              @(F32, 2, (128, 10))
              (max_fun, v_cst_0)
@@ -38,10 +38,18 @@ con extern main_tensor [arg0: «784; «1024; F32»», arg1: «1024; F32», arg2:
 // CHECK: module
 // CHECK: func.func public @main_tensor
 // CHECK: tensor<784x1024xf32>
+// The K dim is strip-mined, so the contraction index is the affine sum `d2 * 4 + d3`.
 // CHECK: linalg.generic
-// CHECK: affine_map<(d0, d1, d2) -> (d0, d2)>
-// CHECK: linalg.broadcast
-// CHECK: dimensions = [0]
+// CHECK-SAME: affine_map<(d0, d1, d2, d3) -> (d0, d2 * 4 + d3)>
+// CHECK-SAME: iterator_types = ["parallel", "parallel", "reduction", "reduction"]
+
+// `fuse_tensor` folds the bias and the tanh into the `post` slot, so the bias is read by the epilogue's access map
+// instead of being materialized by a `linalg.broadcast` first; its size-1 axis collapses out of that map.
+// CHECK: linalg.generic
+// CHECK-SAME: affine_map<(d0, d1) -> (d1)>
 // CHECK: math.tanh
+
+// The row-max writes one element per row, so its write map drops `d1` — unique to the reducing generic.
+// CHECK: affine_map<(d0, d1) -> (d0)>
 // CHECK: arith.maximumf
 // CHECK: func.return {{.*}} tensor<128xf32>

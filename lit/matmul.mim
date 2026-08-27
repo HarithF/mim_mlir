@@ -19,11 +19,14 @@ fun extern main (): «2; «2; F32»» =
 // CHECK: func.func public @main() -> tensor<2x2xf32>
 // CHECK: arith.constant dense<{{.*}}> : tensor<2x2xf32>
 // CHECK: tensor.empty() : tensor<2x2xf32>
+// The reduction dim is strip-mined, so the contraction index is the affine sum `d2 + d3`; the third operand is the
+// shape-only one that names the pair, since no other map exposes either as a bare dim.
 // CHECK: linalg.generic
-// CHECK-SAME: affine_map<(d0, d1, d2) -> (d0, d2)>
-// CHECK-SAME: affine_map<(d0, d1, d2) -> (d2, d1)>
-// CHECK-SAME: affine_map<(d0, d1, d2) -> (d0, d1)>
-// CHECK-SAME: iterator_types = ["parallel", "parallel", "reduction"]
+// CHECK-SAME: affine_map<(d0, d1, d2, d3) -> (d0, d2 + d3)>
+// CHECK-SAME: affine_map<(d0, d1, d2, d3) -> (d2 + d3, d1)>
+// CHECK-SAME: affine_map<(d0, d1, d2, d3) -> (d2, d3)>
+// CHECK-SAME: affine_map<(d0, d1, d2, d3) -> (d0, d1)>
+// CHECK-SAME: iterator_types = ["parallel", "parallel", "reduction", "reduction"]
 // CHECK: arith.mulf
 // CHECK: arith.addf
 // CHECK: linalg.yield

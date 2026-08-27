@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstring>
 
+#include <algorithm>
 #include <functional>
 
 #include <mim/def.h>
@@ -134,10 +135,14 @@ struct AffineMapInfo {
     std::vector<size_t> bare_dims;
 };
 
-/// Renders a `%tensor.map_reduce` access lam as an MLIR `affine_map` over @p total_loops loop dims.
+/// Renders a `%tensor.map_reduce_post` access lam as an MLIR `affine_map` over @p total_loops loop dims.
 /// @p loop_extents bounds those dims (see AffineExtents); it lets the affine folder discard the `mod`/`floordiv`
 /// terms that the loop domain makes redundant.
-inline AffineMapInfo lam_to_affine_map(Lam* lam, size_t total_loops, const AffineExtents& loop_extents) {
+/// @p omit names output positions to leave out, for an operand whose size-1 axes collapsed out of its Mim type.
+inline AffineMapInfo lam_to_affine_map(Lam* lam,
+                                       size_t total_loops,
+                                       const AffineExtents& loop_extents,
+                                       const std::vector<size_t>& omit = {}) {
     assert(lam && lam->is_set());
 
     // infer actual param count
@@ -183,7 +188,8 @@ inline AffineMapInfo lam_to_affine_map(Lam* lam, size_t total_loops, const Affin
     std::string result_str;
     std::vector<size_t> bare_dims;
     for (size_t i = 0; i < results.size(); ++i) {
-        if (i) result_str += ", ";
+        if (std::ranges::find(omit, i) != omit.end()) continue;
+        if (!result_str.empty()) result_str += ", ";
 
         if (auto e = affine_expr(results[i], params, loop_extents)) {
             result_str += e->str();
