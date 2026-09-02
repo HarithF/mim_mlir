@@ -51,6 +51,8 @@ private:
     std::string fresh_name(std::string prefix);
     bool is_return_callee(const Def* c, const Def* ret_var);
     MLIRValue wrap_as_tensor(const Def* input, MLIRValue in_val, MLIRBlock& into);
+    MLIRValue
+    restore_unit_axes(const Def* def, MLIRValue val, const std::vector<std::optional<int64_t>>& want, MLIRBlock& into);
 
     //  -------arg seeding -----------
     void seed_dom_op(const Def* op, std::vector<MLIRValue>& args);

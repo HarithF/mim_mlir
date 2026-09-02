@@ -186,13 +186,87 @@ std::optional<MLIRValue> MLIREmitter::try_emit_tensor_op(const App* app, MLIRBlo
 
     return std::nullopt;
 }
+
+/// Re-materializes the size-1 axes that dropped out of @p val's Mim type, so its rank matches @p want.
+///
+/// `«1; T»` *is* `T` in MimIR (World::seq folds arity-1 sequences away), so a rank-4 tensor whose trailing axes are
+/// singletons — a 1x1 convolution weight `«cout, cin, 1, 1; T»`, say — is typed `«cout, cin; T»` and converts to a
+/// rank-2 `tensor`. The tensor ops carry the true shape separately (`Sis`, `s_in`, …), and the affine access maps are
+/// written against *that* rank, so an operand taken straight from the type is short by however many unit axes
+/// collapsed. `tensor.expand_shape` puts them back; it is pure metadata, so the function signature — and with it the
+/// ABI the caller was compiled against — stays as it was.
+MLIRValue MLIREmitter::restore_unit_axes(const Def* def,
+                                         MLIRValue val,
+                                         const std::vector<std::optional<int64_t>>& want,
+                                         MLIRBlock& into) {
+    // An operand that failed to emit at all is somebody else's diagnostic; do not compound it here.
+    if (val.empty()) return val;
+
+    // A tensor all of whose axes are 1 collapses to its element type; wrap it back up into the rank-0 tensor that
+    // `tensor.expand_shape` can grow. Anything else non-tensor is not this bug — leave it for its own diagnostic.
+    if (!std::holds_alternative<MLIRTensorType>(val.type)) {
+        auto is_scalar
+            = std::holds_alternative<MLIRFloatType>(val.type) || std::holds_alternative<MLIRIntType>(val.type);
+        if (want.empty() || !is_scalar) return val;
+        val = wrap_as_tensor(def, std::move(val), into);
+    }
+
+    auto have = std::get<MLIRTensorType>(val.type).shape;
+    if (have == want) return val;
+
+    if (have.size() > want.size()) {
+        std::cerr << "mlir: operand " << val.name << " has rank " << have.size() << " but its access map expects "
+                  << want.size() << "; not a collapsed-unit-axis mismatch, leaving it alone\n";
+        return val;
+    }
+
+    // One group per source axis, each closed by the axis it maps to; the inserted unit axes join the group to their
+    // left, except leading ones, which have no group yet and so join the first. `have` is matched greedily against
+    // `want`: an axis that agrees consumes a source axis, anything else must be an inserted singleton.
+    std::vector<std::vector<int64_t>> reassoc;
+    size_t src = 0;
+    for (size_t i = 0; i < want.size(); ++i) {
+        // A rank-0 source splits into no groups at all — `[]` — and every result axis is an inserted 1.
+        if (!have.empty()) {
+            if (reassoc.empty()) reassoc.emplace_back();
+            reassoc.back().push_back(static_cast<int64_t>(i));
+        }
+        if (src < have.size() && have[src] == want[i]) {
+            if (++src < have.size()) reassoc.emplace_back();
+        } else if (want[i] != 1) {
+            std::cerr << "mlir: cannot reconcile operand " << val.name << " with the shape its access map expects; "
+                      << "axis " << i << " is neither a match nor a collapsed size-1 axis\n";
+            return val;
+        }
+    }
+    if (src != have.size()) {
+        std::cerr << "mlir: cannot reconcile operand " << val.name << " with the shape its access map expects; "
+                  << have.size() - src << " of its axes went unmatched\n";
+        return val;
+    }
+
+    MLIRTensorType expanded;
+    expanded.shape = want;
+    expanded.elem  = std::get<MLIRTensorType>(val.type).elem;
+
+    // The same Def can feed several `linalg.generic`s, each expanding it for itself, so the name needs a
+    // disambiguator of its own — `fresh_name(def)` is memoized and hands out the same base every time.
+    auto name = fresh_name(def) + ".expanded";
+    for (int i = 1; !used_names_.insert(name).second; ++i)
+        name = std::format("{}.expanded_{}", fresh_name(def), i);
+
+    MLIRValue result{std::move(name), MLIRType{std::move(expanded)}};
+    into.ops.emplace_back(std::make_unique<TensorExpandShapeOp>(result, std::move(val), std::move(reassoc)));
+    return result;
+}
+
 void MLIREmitter::emit_linalg_generic(const App* app, MLIRBlock& into) {
     // Currying chain (depth 8):
     //   app0->arg = (is, post_is)                    (inputs pack)
     //   app1->arg = (maps, post_maps)                (per-input access lams)
     //   app2->arg = map_out                          (output access lam)
     //   app3->arg = (f, init, post)
-    //   app4->arg = (Tis,Ris,Sis,Tps,Rps,Sps) [skip, implicit type args]
+    //   app4->arg = (Tis,Ris,Sis,Tps,Rps,Sps)   (implicit per-input/post element type, rank, shape)
     //   app5->arg = (So, Sr, sched)                  (output shape, full loop bounds)
     //   app6->arg = (To, Tp, Ro, Rn, TSched)
     //   app7->arg = (nis, nps)
@@ -260,9 +334,25 @@ void MLIREmitter::emit_linalg_generic(const App* app, MLIRBlock& into) {
     MLIRType res_type{std::move(res_tensor)};
 
     // ── Inputs ────────────────────────────────────────────────────────────
+    // `Ris`/`Sis` state each input's rank and extents, which is what the access maps are written against. The Mim
+    // type cannot be trusted for the rank: its size-1 axes have collapsed away (see restore_unit_axes).
     std::vector<MLIRValue> ins;
-    for (size_t i = 0; i < n_inputs; ++i)
-        ins.push_back(get_or_emit(proj_input(i), into));
+    for (size_t i = 0; i < n_inputs; ++i) {
+        auto* in    = proj_input(i);
+        auto in_val = get_or_emit(in, into);
+
+        if (auto ris = Lit::isa(n_inputs == 1 ? Ris : Ris->proj(n_inputs, i))) {
+            auto* Sis_i = n_inputs == 1 ? Sis : Sis->proj(n_inputs, i);
+            std::vector<std::optional<int64_t>> in_shape;
+            for (size_t j = 0; j < *ris; ++j) {
+                auto dim = Lit::isa(*ris == 1 ? Sis_i : Sis_i->proj(*ris, j));
+                in_shape.push_back(dim ? std::optional<int64_t>(static_cast<int64_t>(*dim)) : std::nullopt);
+            }
+            in_val = restore_unit_axes(in, std::move(in_val), in_shape, into);
+        }
+
+        ins.push_back(std::move(in_val));
+    }
 
     // ── Output buffer ─────────────────────────────────────────────────────
 
