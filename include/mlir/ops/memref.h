@@ -63,6 +63,40 @@ private:
     std::vector<std::vector<int64_t>> reassoc_;
 };
 
+/// `%r = tensor.expand_shape %src [[0], [1, 2, 3]] output_shape [3, 2, 1, 1] : tensor<…> into tensor<…>`.
+/// The inverse of TensorCollapseShapeOp: each reassociation group names the result axes one source axis splits into,
+/// and an empty group list expands a rank-0 source. `output_shape` repeats the result extents, so every one of them
+/// has to be static here (a dynamic axis would need a `tensor.dim` operand).
+class TensorExpandShapeOp : public MLIROp {
+public:
+    TensorExpandShapeOp(MLIRValue result, MLIRValue src, std::vector<std::vector<int64_t>> reassoc)
+        : MLIROp({std::move(result)}, {std::move(src)})
+        , reassoc_(std::move(reassoc)) {}
+
+    void print(Printer& p) const override {
+        std::string groups;
+        for (size_t g = 0; g < reassoc_.size(); ++g) {
+            groups += (g ? ", [" : "[");
+            for (size_t i = 0; i < reassoc_[g].size(); ++i)
+                groups += (i ? ", " : "") + std::to_string(reassoc_[g][i]);
+            groups += "]";
+        }
+
+        std::string out_shape;
+        auto& shape = std::get<MLIRTensorType>(results_[0].type).shape;
+        for (size_t i = 0; i < shape.size(); ++i) {
+            assert(shape[i] && "tensor.expand_shape needs a static output_shape");
+            out_shape += (i ? ", " : "") + std::to_string(*shape[i]);
+        }
+
+        p.line("{} = tensor.expand_shape {} [{}] output_shape [{}] : {} into {}", results_[0].name, operands_[0].name,
+               groups, out_shape, print_type(operands_[0].type), print_type(results_[0].type));
+    }
+
+private:
+    std::vector<std::vector<int64_t>> reassoc_;
+};
+
 /// `%r = tensor.concat dim(d) %a, %b, … : (tensor<…>, tensor<…>, …) -> tensor<…>`.
 class TensorConcatOp : public MLIROp {
 public:
