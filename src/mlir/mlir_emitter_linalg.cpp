@@ -285,6 +285,7 @@ void MLIREmitter::emit_linalg_generic(const App* app, MLIRBlock& into) {
     auto [So, Sr, sched]                 = app5->arg()->projs<3>();
     auto [To, Tp, Ro, Rn, TSched]        = app6->arg()->projs<5>();
     auto [nis_def, nps_def]              = app7->arg()->projs<2>();
+    auto [Tis, Ris, Sis, Tps, Rps, Sps] = app4->arg()->projs<6>();
 
     auto nis_opt = Lit::isa(nis_def);
     auto nps_opt = Lit::isa(nps_def);
@@ -464,7 +465,6 @@ void MLIREmitter::emit_linalg_generic(const App* app, MLIRBlock& into) {
 
     // The identity map on the folded result exposes every output dim as a bare `d<i>`, so the op stays invertible
     // whatever arithmetic the epilogue maps use — no shape-only operand is ever needed here.
-    auto [Tis, Ris, Sis, Tps, Rps, Sps] = app4->arg()->projs<6>();
 
     std::vector<MLIRValue> post_ins{op->result()};
     std::vector<std::string> post_indexing_maps{identity_map};
