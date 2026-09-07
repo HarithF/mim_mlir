@@ -6,16 +6,6 @@
 
 #include <mim/plug/tensor/autogen.h>
 
-template<>
-struct mim::Axm::IsANode<mim::plug::tensor::broadcast> {
-    using type = mim::App;
-};
-
-template<>
-struct mim::Axm::IsANode<mim::plug::tensor::map_reduce> {
-    using type = mim::App;
-}; // was not instanciated by autogen
-
 namespace mim::mlir_be {
 
 enum class LamKind {

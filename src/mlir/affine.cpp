@@ -293,7 +293,7 @@ AffineExprRef affine_expr(const Def* def, const std::vector<const Def*>& params,
     // interposed. This is the shape of `%tensor.reshape`'s read map whenever the input is rank 1.
     if (auto dl = Axm::isa<plug::affine::delinearize>(app)) return delinearize_axis(dl, 0, params, extents);
 
-    if (auto c = Axm::isa<plug::affine::constant>(app)) {
+    if (auto c = Axm::isa<plug::affine::lit>(app)) {
         auto lit = Lit::isa(c->arg());
         return lit ? aff_const(static_cast<int64_t>(*lit)) : nullptr;
     }

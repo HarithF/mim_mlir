@@ -1,4 +1,5 @@
 #pragma once
+#include <map>
 #include <optional>
 #include <ostream>
 #include <set>
@@ -72,6 +73,16 @@ private:
     std::optional<MLIRValue> try_emit_tensor_op(const App* app, MLIRBlock& into);
     void emit_linalg_generic(const App* mr_app, MLIRBlock& into);
     void emit_linalg_body(Lam* body_lam, MLIRBlock& body_bb);
+    void emit_linalg_body_scoped(Lam* body_lam, MLIRBlock& body_bb);
+
+    /// Block args for a `[acc, ins]` fold or epilogue lam; the caller orders them ins-then-outs for its own op.
+    struct LinalgBodySeed {
+        MLIRValue acc;
+        std::vector<MLIRValue> ins; ///< one per input element, in parameter order
+        std::map<std::vector<size_t>, MLIRValue> paths;
+    };
+    LinalgBodySeed seed_linalg_args(Lam* body_lam, const MLIRType& acc_type);
+    void bind_linalg_args(Lam* body_lam, const LinalgBodySeed& seed);
 
     World& world_;
     std::ostream& os_;
