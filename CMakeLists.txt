@@ -18,5 +18,4 @@ add_mim_plugin(mlir
         src/mlir/printer.cpp
         src/mlir/region_tree.cpp
         src/mlir/type_converter.cpp
-    INSTALL
 )
