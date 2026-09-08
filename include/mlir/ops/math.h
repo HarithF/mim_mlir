@@ -7,13 +7,17 @@ namespace mim::mlir_be {
 class MathUnaryOp : public MLIROp {
 public:
     enum class Kind {
-        Tanh, // math.tanh
-        Sin,  // math.sin
-        Cos,  // math.cos
-        Exp,  // math.exp
-        Log,  // math.log
-        Sqrt, // math.sqrt
-        Abs,  // math.absf
+        Tanh,
+        Sin,
+        Cos,
+        Exp,
+        Exp2,
+        Log,
+        Log2,
+        Log10,
+        Sqrt,
+        Cbrt,
+        Abs,
     };
 
     MathUnaryOp(MLIRValue result, Kind kind, MLIRValue operand)
@@ -31,8 +35,12 @@ private:
             case Kind::Sin: return "math.sin";
             case Kind::Cos: return "math.cos";
             case Kind::Exp: return "math.exp";
+            case Kind::Exp2: return "math.exp2";
             case Kind::Log: return "math.log";
+            case Kind::Log2: return "math.log2";
+            case Kind::Log10: return "math.log10";
             case Kind::Sqrt: return "math.sqrt";
+            case Kind::Cbrt: return "math.cbrt";
             case Kind::Abs: return "math.absf";
         }
         return "?";

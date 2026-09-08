@@ -98,6 +98,8 @@ is loaded dynamically at runtime via `-p mlir`.
 | `%core.icmp`                                        | `arith.cmpi`                          |
 | `%math.arith` (add/sub/mul/div/rem)                 | `arith` binary float ops              |
 | `%math.tri` (tanh/sin/cos)                          | `math` unary ops                      |
+| `%math.rt` (sq/cb)                                  | `math.sqrt` / `math.cbrt`             |
+| `%math.exp` (exp/exp2/log/log2/log10)               | `math` unary ops                      |
 | `%math.extrema` (fmax/fmin/ieee754max/ieee754min)   | `arith` binary float ops              |
 | `%affine.For`                                       | `scf.for`                             |
 | `%tensor.map_reduce`                                | `linalg.generic`                      |
