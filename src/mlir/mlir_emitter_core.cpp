@@ -202,6 +202,15 @@ MLIRValue MLIREmitter::emit_def(const Def* def, MLIRBlock& into) {
                     into.ops.emplace_back(std::make_unique<DenseConstOp>(result, std::move(dense_str)));
                     return result;
                 }
+                // A Pack of a computed scalar has no dense attribute to print; splat it at runtime.
+                if (cur != def) {
+                    auto val = get_or_emit(cur, into);
+                    MLIRValue buf{name + ".empty", mlir_type};
+                    into.ops.emplace_back(std::make_unique<TensorEmptyOp>(buf));
+                    MLIRValue result{name, mlir_type};
+                    into.ops.emplace_back(std::make_unique<LinalgFillOp>(result, val, buf));
+                    return result;
+                }
             }
 
             // Non-uniform: enumerate.
@@ -417,13 +426,38 @@ std::optional<MLIRValue> MLIREmitter::try_emit_arith(const App* app, MLIRBlock& 
         return result;
     }
 
-    // math::exp (exp/log variants — 'lbb' etc. are sub-tag combinations)
-    if (Axm::isa<plug::math::exp>(app)) {
+    if (auto rt = Axm::isa<plug::math::rt>(def)) {
         auto a = get_or_emit(app->arg(), into);
         auto t = types_.convert(def->type());
+        MathUnaryOp::Kind kind;
+        switch (rt.id()) {
+            case plug::math::rt::sq: kind = MathUnaryOp::Kind::Sqrt; break;
+            case plug::math::rt::cb: kind = MathUnaryOp::Kind::Cbrt; break;
+            default: assert(false && "unhandled math.rt");
+        }
         MLIRValue result{fresh_name(def), t};
-        into.ops.emplace_back(std::make_unique<MathUnaryOp>(result, MathUnaryOp::Kind::Exp, a));
+        into.ops.emplace_back(std::make_unique<MathUnaryOp>(result, kind, a));
         return result;
+    }
+
+    // exp10 and the unused sub-tags have no math-dialect counterpart and fall through to the caller's diagnostic.
+    if (auto e = Axm::isa<plug::math::exp>(def)) {
+        std::optional<MathUnaryOp::Kind> kind;
+        switch (e.id()) {
+            case plug::math::exp::exp: kind = MathUnaryOp::Kind::Exp; break;
+            case plug::math::exp::exp2: kind = MathUnaryOp::Kind::Exp2; break;
+            case plug::math::exp::log: kind = MathUnaryOp::Kind::Log; break;
+            case plug::math::exp::log2: kind = MathUnaryOp::Kind::Log2; break;
+            case plug::math::exp::log10: kind = MathUnaryOp::Kind::Log10; break;
+            default: break;
+        }
+        if (kind) {
+            auto a = get_or_emit(app->arg(), into);
+            auto t = types_.convert(def->type());
+            MLIRValue result{fresh_name(def), t};
+            into.ops.emplace_back(std::make_unique<MathUnaryOp>(result, *kind, a));
+            return result;
+        }
     }
     return std::nullopt;
 }

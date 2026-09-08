@@ -195,6 +195,36 @@ std::optional<MLIRValue> MLIREmitter::try_emit_tensor_op(const App* app, MLIRBlo
 /// written against *that* rank, so an operand taken straight from the type is short by however many unit axes
 /// collapsed. `tensor.expand_shape` puts them back; it is pure metadata, so the function signature — and with it the
 /// ABI the caller was compiled against — stays as it was.
+/// A `%tensor.map_reduce` access map may cover only a prefix of an input axis — slicing a 48-wide tensor down to
+/// its first 32 columns reaches the emitter as an identity map over a 32-wide loop. `linalg.generic` requires each
+/// map's image to be exactly the operand's shape, so materialize the prefix with `tensor.extract_slice`.
+MLIRValue MLIREmitter::narrow_to_map(MLIRValue val,
+                                     const AffineMapInfo& info,
+                                     const AffineExtents& loop_extents,
+                                     MLIRBlock& into) {
+    if (val.empty() || !std::holds_alternative<MLIRTensorType>(val.type)) return val;
+
+    auto shape = std::get<MLIRTensorType>(val.type).shape;
+    if (shape.size() != info.pos_dims.size()) return val;
+
+    auto want = shape;
+    for (size_t i = 0; i < shape.size(); ++i) {
+        auto dim = info.pos_dims[i];
+        if (!dim || *dim >= loop_extents.size()) continue;
+        auto extent = loop_extents[*dim];
+        if (!extent || !shape[i]) continue;
+        if (*extent < *shape[i]) want[i] = *extent;
+    }
+    if (want == shape) return val;
+
+    MLIRTensorType sliced_t;
+    sliced_t.shape = std::move(want);
+    sliced_t.elem  = std::get<MLIRTensorType>(val.type).elem;
+    MLIRValue sliced{val.name + ".slice", MLIRType{std::move(sliced_t)}};
+    into.ops.emplace_back(std::make_unique<TensorExtractSliceOp>(sliced, std::move(val)));
+    return sliced;
+}
+
 MLIRValue MLIREmitter::restore_unit_axes(const Def* def,
                                          MLIRValue val,
                                          const std::vector<std::optional<int64_t>>& want,
@@ -337,6 +367,13 @@ void MLIREmitter::emit_linalg_generic(const App* app, MLIRBlock& into) {
     // ── Inputs ────────────────────────────────────────────────────────────
     // `Ris`/`Sis` state each input's rank and extents, which is what the access maps are written against. The Mim
     // type cannot be trusted for the rank: its size-1 axes have collapsed away (see restore_unit_axes).
+    // The access maps are needed here, before the operands are finalized: a map may cover only a prefix of an
+    // input axis, and the operand has to be narrowed to match. `lam_to_affine_map` is pure, so computing it early
+    // costs nothing and the results are reused for `indexing_maps` below.
+    std::vector<AffineMapInfo> in_map_info;
+    for (size_t i = 0; i < n_inputs; ++i)
+        in_map_info.push_back(lam_to_affine_map(proj_map_lam(i), total_loops, loop_extents));
+
     std::vector<MLIRValue> ins;
     for (size_t i = 0; i < n_inputs; ++i) {
         auto* in    = proj_input(i);
@@ -352,6 +389,7 @@ void MLIREmitter::emit_linalg_generic(const App* app, MLIRBlock& into) {
             in_val = restore_unit_axes(in, std::move(in_val), in_shape, into);
         }
 
+        in_val = narrow_to_map(std::move(in_val), in_map_info[i], loop_extents, into);
         ins.push_back(std::move(in_val));
     }
 
@@ -382,7 +420,7 @@ void MLIREmitter::emit_linalg_generic(const App* app, MLIRBlock& into) {
     };
 
     for (size_t i = 0; i < n_inputs; ++i)
-        add_map(lam_to_affine_map(proj_map_lam(i), total_loops, loop_extents));
+        add_map(in_map_info[i]);
     auto out_map = lam_to_affine_map(map_out, total_loops, loop_extents);
     add_map(out_map);
 
@@ -476,17 +514,37 @@ void MLIREmitter::emit_linalg_generic(const App* app, MLIRBlock& into) {
 
         auto in_val = get_or_emit(in, into);
 
-        // Size-1 axes collapse out of a tensor's Mim type, so an epilogue input declared `«1, 32; T»` arrives as a
-        // rank-1 `«32; T»`. Drop those positions from its access map, or `linalg.generic` sees a rank mismatch.
+        // Size-1 axes collapse out of a tensor's Mim type, so an epilogue input declared `«1, 32; T»` can arrive as
+        // a rank-1 `«32; T»`; those positions have to drop out of its access map. But a value the emitter itself
+        // materialized keeps them — a previous epilogue's result is built at the full `res_shape` — so which axes
+        // are really gone follows from the operand's own rank, not from the declared shape alone.
         auto rp = Lit::isa(Rp);
         assert(rp && "epilogue input rank must be literal");
-        std::vector<size_t> omit;
-        for (size_t i = 0; i < *rp; ++i)
-            if (auto lit = Lit::isa(*rp == 1 ? Sp : Sp->proj(*rp, i)); lit && *lit == 1) omit.push_back(i);
+        std::vector<std::optional<int64_t>> declared;
+        for (size_t i = 0; i < *rp; ++i) {
+            auto lit = Lit::isa(*rp == 1 ? Sp : Sp->proj(*rp, i));
+            declared.push_back(lit ? std::optional<int64_t>(static_cast<int64_t>(*lit)) : std::nullopt);
+        }
 
         auto* in_tensor = std::get_if<MLIRTensorType>(&in_val.type);
-        assert(*rp - omit.size() == (in_tensor ? in_tensor->shape.size() : 0)
-               && "epilogue input rank does not match its access map");
+        auto have       = in_tensor ? in_tensor->shape : std::vector<std::optional<int64_t>>{};
+
+        std::vector<size_t> omit;
+        size_t src = 0;
+        for (size_t i = 0; i < declared.size(); ++i) {
+            if (src < have.size() && have[src] == declared[i]) {
+                ++src;
+            } else if (declared[i] == 1) {
+                omit.push_back(i);
+            } else {
+                std::cerr << "mlir: epilogue input " << in_val.name << " axis " << i
+                          << " is neither present in the operand nor a collapsed size-1 axis\n";
+                break;
+            }
+        }
+        if (src != have.size())
+            std::cerr << "mlir: epilogue input " << in_val.name << " has rank " << have.size()
+                      << " that does not align with its declared rank " << *rp << "\n";
 
         post_ins.push_back(in_val);
         post_indexing_maps.push_back(lam_to_affine_map(map->isa_mut<Lam>(), ro, res_shape, omit).str);
@@ -618,7 +676,7 @@ void MLIREmitter::emit_linalg_body_scoped(Lam* body_lam, MLIRBlock& body_bb) {
     for (auto& [d, _] : values_)
         pre_body_keys.insert(d);
 
-    emit_linalg_body(body_lam, body_bb);
+    emit_linalg_body(body_lam, body_lam->ret_var(), body_bb);
 
     std::vector<const Def*> body_added;
     for (auto& [d, _] : values_)
@@ -631,14 +689,14 @@ void MLIREmitter::emit_linalg_body_scoped(Lam* body_lam, MLIRBlock& body_bb) {
     }
 }
 
-void MLIREmitter::emit_linalg_body(Lam* body_lam, MLIRBlock& body_bb) {
+void MLIREmitter::emit_linalg_body(Lam* body_lam, const Def* ret_var, MLIRBlock& body_bb) {
     assert(body_lam->is_set());
     auto* app = body_lam->body()->isa<App>();
     assert(app);
     auto* callee = app->callee();
     auto* arg    = app->arg();
 
-    if (is_return_callee(callee, body_lam->ret_var())) {
+    if (is_return_callee(callee, ret_var)) {
         std::vector<MLIRValue> yield_vals;
         if (!Axm::isa<plug::mem::M>(arg->type())) {
             auto v = get_or_emit(arg, body_bb);
@@ -666,12 +724,14 @@ void MLIREmitter::emit_linalg_body(Lam* body_lam, MLIRBlock& body_bb) {
                 if (!v.empty()) values_[local_lam->var()] = v;
             }
             // Recurse into the local lam's body in the same block
-            emit_linalg_body(local_lam, body_bb);
+            emit_linalg_body(local_lam, local_lam->ret_var() ? local_lam->ret_var() : ret_var, body_bb);
             return;
         }
     }
 
-    std::cerr << "unhandled callee in emit_linalg_body: " << callee->sym().str() << "\n";
+    auto [axm, curry, trip] = Axm::get(app);
+    std::cerr << "unhandled callee in emit_linalg_body: " << callee->node_name() << " sym='" << callee->sym().str()
+              << "' axm='" << (axm ? axm->sym().str() : "<none>") << "' type=" << callee->type() << "\n";
     assert(false && "unhandled callee in emit_linalg_body");
 }
 

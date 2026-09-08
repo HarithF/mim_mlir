@@ -76,7 +76,7 @@ inline std::string make_dense_attr(const std::vector<uint64_t>& vals, const MLIR
             for (size_t i = 0; i < dims[dim_idx]; ++i) {
                 if (i) s += ", ";
                 // print as integer if whole number, float otherwise
-                uint64_t v = vals[flat_idx++];
+                uint64_t v = vals.at(flat_idx++);
                 s += format_lit(v, elem);
             }
             return s + "]";
@@ -133,6 +133,9 @@ struct AffineMapInfo {
     /// `linalg.generic` recovers the loop nest by inverting the concatenated maps, so a dim that only ever occurs
     /// inside an expression (`d2 * 2 + d4`) does not count as recovered.
     std::vector<size_t> bare_dims;
+    /// One entry per *emitted* output position: the loop dim it exposes as a bare `d<j>`, if any.
+    /// Lets a caller tell which operand axis a given loop dim indexes.
+    std::vector<std::optional<size_t>> pos_dims;
 };
 
 /// Renders a `%tensor.map_reduce_post` access lam as an MLIR `affine_map` over @p total_loops loop dims.
@@ -187,15 +190,20 @@ inline AffineMapInfo lam_to_affine_map(Lam* lam,
 
     std::string result_str;
     std::vector<size_t> bare_dims;
+    std::vector<std::optional<size_t>> pos_dims;
     for (size_t i = 0; i < results.size(); ++i) {
         if (std::ranges::find(omit, i) != omit.end()) continue;
         if (!result_str.empty()) result_str += ", ";
 
         if (auto e = affine_expr(results[i], params, loop_extents)) {
             result_str += e->str();
-            if (auto d = std::get_if<AffineDim>(&e->expr)) bare_dims.push_back(d->pos);
+            auto* d = std::get_if<AffineDim>(&e->expr);
+            if (d) bare_dims.push_back(d->pos);
+            pos_dims.push_back(d ? std::optional<size_t>(d->pos) : std::nullopt);
             continue;
         }
+        // A guessed position stays null in `pos_dims` on purpose: nothing may narrow an operand off a guess.
+        pos_dims.push_back(std::nullopt);
 
         // Outside the affine grammar. Fall back to the old "which single loop var drives this position" guess, which
         // is right for pure projections and broadcasts but silently wrong for anything with real index arithmetic —
@@ -210,7 +218,7 @@ inline AffineMapInfo lam_to_affine_map(Lam* lam,
         }
     }
 
-    return {std::format("affine_map<({}) -> ({})>", dim_str, result_str), std::move(bare_dims)};
+    return {std::format("affine_map<({}) -> ({})>", dim_str, result_str), std::move(bare_dims), std::move(pos_dims)};
 }
 
 } // namespace mim::mlir_be

@@ -18,6 +18,7 @@
 #include "mlir/ops/math.h"
 #include "mlir/ops/memref.h"
 #include "mlir/ops/scf.h"
+#include "mlir/ops/tensor_util.h"
 #include "mlir/printer.h"
 #include "mlir/region_tree.h"
 #include "mlir/type_converter.h"
@@ -53,6 +54,8 @@ private:
     MLIRValue wrap_as_tensor(const Def* input, MLIRValue in_val, MLIRBlock& into);
     MLIRValue
     restore_unit_axes(const Def* def, MLIRValue val, const std::vector<std::optional<int64_t>>& want, MLIRBlock& into);
+    MLIRValue
+    narrow_to_map(MLIRValue val, const AffineMapInfo& info, const AffineExtents& loop_extents, MLIRBlock& into);
 
     //  -------arg seeding -----------
     void seed_dom_op(const Def* op, std::vector<MLIRValue>& args);
@@ -72,7 +75,7 @@ private:
 
     std::optional<MLIRValue> try_emit_tensor_op(const App* app, MLIRBlock& into);
     void emit_linalg_generic(const App* mr_app, MLIRBlock& into);
-    void emit_linalg_body(Lam* body_lam, MLIRBlock& body_bb);
+    void emit_linalg_body(Lam* body_lam, const Def* ret_var, MLIRBlock& body_bb);
     void emit_linalg_body_scoped(Lam* body_lam, MLIRBlock& body_bb);
 
     /// Block args for a `[acc, ins]` fold or epilogue lam; the caller orders them ins-then-outs for its own op.

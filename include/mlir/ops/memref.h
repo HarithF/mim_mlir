@@ -39,6 +39,29 @@ public:
     }
 };
 
+/// `%r = tensor.extract_slice %src[0, …] [sizes] [1, …] : tensor<…> to tensor<…>`.
+/// Only static, unit-stride prefixes are emitted, which is all a narrowed access map needs.
+class TensorExtractSliceOp : public MLIROp {
+public:
+    TensorExtractSliceOp(MLIRValue result, MLIRValue src)
+        : MLIROp({std::move(result)}, {std::move(src)}) {}
+
+    void print(Printer& p) const override {
+        auto& shape = std::get<MLIRTensorType>(results_[0].type).shape;
+        std::string offsets, sizes, strides;
+        for (size_t i = 0; i < shape.size(); ++i) {
+            assert(shape[i] && "tensor.extract_slice needs a static result shape");
+            offsets += (i ? ", " : "");
+            offsets += "0";
+            sizes += (i ? ", " : "") + std::to_string(*shape[i]);
+            strides += (i ? ", " : "");
+            strides += "1";
+        }
+        p.line("{} = tensor.extract_slice {}[{}] [{}] [{}] : {} to {}", results_[0].name, operands_[0].name, offsets,
+               sizes, strides, print_type(operands_[0].type), print_type(results_[0].type));
+    }
+};
+
 /// `%r = tensor.collapse_shape %src [[0, 1], [2]] : tensor<…> into tensor<…>`.
 /// Each reassociation group is merged into one output axis; an empty group list collapses to rank 0.
 class TensorCollapseShapeOp : public MLIROp {
