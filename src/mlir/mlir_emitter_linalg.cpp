@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <functional>
+#include <iostream>
 #include <ranges>
 
 #include <mim/lam.h>
@@ -481,14 +482,18 @@ void MLIREmitter::emit_linalg_generic(const App* app, MLIRBlock& into) {
     values_[app] = op->result();
     into.ops.emplace_back(op);
 
-    if (n_post == 0) return;
-
     // ── Epilogue ──────────────────────────────────────────────────────────
     // `post` runs once per output cell, after the reduction has been folded away, so it cannot sit in the reduction
     // body — it becomes a second, all-parallel `linalg.generic` over the `Ro` output coordinates. `post_maps` are
     // already stated over exactly those coordinates.
+
+    if (plug::tensor::is_identity_post(post)) return;
+
     auto* post_lam = post->isa_mut<Lam>();
-    assert(post_lam && "epilogue must be a lam");
+    if (!post_lam || !post_lam->is_set()) {
+        std::cerr << "mlir: map_reduce epilogue is neither %tensor.id nor a set lam; the result would be wrong\n";
+        return;
+    }
 
     auto post_elem_type = types_.convert(Tp);
     MLIRTensorType post_tensor;
