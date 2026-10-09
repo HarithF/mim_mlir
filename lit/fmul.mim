@@ -4,13 +4,11 @@ plugin core;
 plugin mem;
 plugin math;
 
-fun extern fmul(a: %math.F32, b: %math.F32): %math.F32 =
-    let r = %math.arith.mul 0 (a, b);
+extern fun fmul(a: math.F32, b: math.F32): math.F32 =
+    let r = math.arith.mul 0 (a, b);
     return r;
 
 // CHECK: module
-// CHECK: func.func public @fmul(%{{.*}}: tensor<2xf32>) -> f32
-// CHECK: tensor.extract
-// CHECK: tensor.extract
+// CHECK: func.func public @fmul(%{{.*}}: f32, %{{.*}}: f32) -> f32
 // CHECK: arith.mulf
 // CHECK: func.return
