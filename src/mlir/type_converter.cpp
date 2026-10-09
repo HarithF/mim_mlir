@@ -37,7 +37,7 @@ MLIRType TypeConverter::convert(const Def* type) {
                     t.shape.push_back(static_cast<int64_t>(*n));
                 else
                     t.shape.push_back(std::nullopt); // dynamic
-                cur = a->body();
+                cur = a->elem();
             }
             t.elem = std::make_shared<MLIRTypeNode>(convert(cur));
             return t;

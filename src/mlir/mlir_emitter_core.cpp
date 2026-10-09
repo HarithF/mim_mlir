@@ -3,6 +3,7 @@
 // dispatcher, and the scalar-arithmetic dispatch helper (try_emit_arith).
 
 #include <cstdint>
+#include <cstdlib>
 
 #include <format>
 #include <functional>
@@ -177,6 +178,27 @@ MLIRValue MLIREmitter::emit_def(const Def* def, MLIRBlock& into) {
             }
         }
 
+        // A runtime index into a tensor is MimIR's n-ary extract, one index per axis: tensor.extract.
+        if (!Lit::isa(ex->index()) && std::holds_alternative<MLIRTensorType>(types_.convert(ex->tuple()->type()))
+            && !std::holds_alternative<MLIRTensorType>(types_.convert(ex->type()))) {
+            auto arr_val = get_or_emit(ex->tuple(), into);
+            auto* idx    = ex->index();
+            size_t rank  = 1;
+            if (auto sigma = idx->type()->isa<Sigma>())
+                rank = sigma->num_ops();
+            else if (auto arr = idx->type()->isa<Arr>())
+                if (auto n = Lit::isa(arr->arity())) rank = *n;
+
+            std::vector<MLIRValue> indices;
+            for (size_t i = 0; i < rank; ++i) {
+                auto elem_val = get_or_emit(rank == 1 ? idx : idx->proj(rank, i), into);
+                indices.push_back(types_.to_index(elem_val, into, fresh_name("%idx")));
+            }
+            MLIRValue result{fresh_name(ex), types_.convert(ex->type())};
+            into.ops.emplace_back(std::make_unique<TensorExtractOp>(result, arr_val, std::move(indices)));
+            return result;
+        }
+
         // dynamic index: scalar value-select `(false_val, true_val)#cond` → arith.select
         if (auto v = try_emit_select(ex, into)) return *v;
 
@@ -195,24 +217,73 @@ MLIRValue MLIREmitter::emit_def(const Def* def, MLIRBlock& into) {
             {
                 const Def* cur = def;
                 while (auto pack = cur->isa<Pack>())
-                    cur = pack->body();
+                    cur = pack->elem();
                 if (auto lit = cur->isa<Lit>()) {
                     std::string dense_str = make_dense_splat(lit->get<u64>(), tt);
                     MLIRValue result{name, mlir_type};
                     into.ops.emplace_back(std::make_unique<DenseConstOp>(result, std::move(dense_str)));
                     return result;
                 }
+                // A Pack of a computed scalar has no dense attribute to print; splat it at runtime.
+                if (cur != def) {
+                    auto val = get_or_emit(cur, into);
+                    MLIRValue buf{name + ".empty", mlir_type};
+                    into.ops.emplace_back(std::make_unique<TensorEmptyOp>(buf));
+                    MLIRValue result{name, mlir_type};
+                    into.ops.emplace_back(std::make_unique<LinalgFillOp>(result, val, buf));
+                    return result;
+                }
             }
 
-            // Non-uniform: enumerate.
+            // Non-uniform, but only when every leaf really is a literal: `make_dense_attr` needs one value per
+            // element and has nothing to print for a computed one.
             {
                 std::vector<uint64_t> raw;
                 collect_lit_tensor(def, raw);
-                auto dense_str = make_dense_attr(raw, tt);
+                size_t want = 1;
+                bool statik = true;
+                for (auto d : tt.shape)
+                    if (d)
+                        want *= static_cast<size_t>(*d);
+                    else
+                        statik = false;
+                if (statik && raw.size() == want) {
+                    auto dense_str = make_dense_attr(raw, tt);
+                    MLIRValue result{name, mlir_type};
+                    into.ops.emplace_back(std::make_unique<DenseConstOp>(result, std::move(dense_str)));
+                    return result;
+                }
+            }
+
+            // A Tuple of computed tensors is a stack along a new leading axis (a q/k/v split arrives this way):
+            // grow each element by that axis and concatenate along it.
+            if (auto tup = def->isa<Tuple>(); tup && tt.shape.size() > 1) {
+                std::vector<MLIRValue> grown;
+                for (size_t i = 0; i < tup->num_ops(); ++i) {
+                    auto val = get_or_emit(tup->op(i), into);
+                    if (val.empty() || !std::holds_alternative<MLIRTensorType>(val.type)) return {};
+
+                    auto& src = std::get<MLIRTensorType>(val.type);
+                    if (src.shape.size() + 1 != tt.shape.size()) return {};
+
+                    MLIRTensorType one = src;
+                    one.shape.insert(one.shape.begin(), 1);
+                    // Source axis 0 spans the inserted axis and its own; the rest map across one-to-one.
+                    std::vector<std::vector<int64_t>> reassoc{
+                        {0, 1}
+                    };
+                    for (size_t d = 2; d < tt.shape.size(); ++d)
+                        reassoc.push_back({static_cast<int64_t>(d)});
+
+                    MLIRValue up{fresh_name(name + ".lift"), MLIRType{std::move(one)}};
+                    into.ops.emplace_back(std::make_unique<TensorExpandShapeOp>(up, val, std::move(reassoc)));
+                    grown.push_back(up);
+                }
                 MLIRValue result{name, mlir_type};
-                into.ops.emplace_back(std::make_unique<DenseConstOp>(result, std::move(dense_str)));
+                into.ops.emplace_back(std::make_unique<TensorConcatOp>(result, std::move(grown), 0));
                 return result;
             }
+            return {};
         }
         return {};
     }
@@ -240,6 +311,45 @@ std::optional<MLIRValue> MLIREmitter::try_emit_select(const Extract* ex, MLIRBlo
     into.ops.emplace_back(std::make_unique<SelectOp>(result, cond_val, true_val, false_val));
     return result;
 }
+
+namespace {
+
+/// The `fastmath<…>` clause for a `%math` op's mode, empty when it permits nothing.
+/// MLIR's `arith.fastmath` flag names mirror LLVM's, which is what `math::Mode` already encodes, so the
+/// flags map across one-to-one.
+std::string fastmath_clause(const Def* mode) {
+    auto lit = Lit::isa(mode);
+    if (!lit) return {};
+    auto m = static_cast<plug::math::Mode>(*lit);
+
+    // `reassoc` is withheld by default: it lets LLVM vectorize a reduction along whatever axis the loop
+    // nest offers, and for a windowed (conv) access that axis is strided — the result is a gather per
+    // iteration, which is slower than the scalar accumulation it replaces.
+    if (auto* env = std::getenv("MIMIR_MLIR_FASTMATH")) {
+        if (std::string_view{env} == "none") return {};
+        if (std::string_view{env} != "full") m = m & ~plug::math::Mode::reassoc;
+    } else {
+        m = m & ~plug::math::Mode::reassoc;
+    }
+
+    if (m == plug::math::Mode::none) return {};
+    if (m == plug::math::Mode::fast) return "fastmath<fast>";
+
+    std::string flags;
+    auto add = [&](plug::math::Mode f, std::string_view name) {
+        if (fe::has_flag(m, f)) flags += (flags.empty() ? "" : ",") + std::string(name);
+    };
+    add(plug::math::Mode::nnan, "nnan");
+    add(plug::math::Mode::ninf, "ninf");
+    add(plug::math::Mode::nsz, "nsz");
+    add(plug::math::Mode::arcp, "arcp");
+    add(plug::math::Mode::contract, "contract");
+    add(plug::math::Mode::afn, "afn");
+    add(plug::math::Mode::reassoc, "reassoc");
+    return flags.empty() ? std::string{} : "fastmath<" + flags + ">";
+}
+
+} // namespace
 
 std::optional<MLIRValue> MLIREmitter::try_emit_arith(const App* app, MLIRBlock& into) {
     namespace core = plug::core;
@@ -281,7 +391,8 @@ std::optional<MLIRValue> MLIREmitter::try_emit_arith(const App* app, MLIRBlock& 
     }
 
     if (auto arith = Axm::isa<plug::math::arith>(app)) {
-        auto [a, b] = arith->args<2>([this, &into](auto d) { return get_or_emit(d, into); });
+        auto [a, b]      = arith->args<2>([this, &into](auto d) { return get_or_emit(d, into); });
+        auto [mode, _ab] = arith->uncurry_args<2>();
 
         auto result_type = types_.convert(def->type());
         BinaryFloatOp::Kind kind;
@@ -294,7 +405,7 @@ std::optional<MLIRValue> MLIREmitter::try_emit_arith(const App* app, MLIRBlock& 
             default: assert(false && "unhandled math.arith op");
         }
         MLIRValue result{fresh_name(def), result_type};
-        into.ops.emplace_back(std::make_unique<BinaryFloatOp>(result, kind, a, b));
+        into.ops.emplace_back(std::make_unique<BinaryFloatOp>(result, kind, a, b, fastmath_clause(mode)));
         return result;
     }
 
@@ -333,7 +444,7 @@ std::optional<MLIRValue> MLIREmitter::try_emit_arith(const App* app, MLIRBlock& 
             default: assert(false && "unhandled math.tri");
         }
         MLIRValue result{fresh_name(def), t};
-        into.ops.emplace_back(std::make_unique<MathUnaryOp>(result, kind, a));
+        into.ops.emplace_back(std::make_unique<MathUnaryOp>(result, kind, a, fastmath_clause(tri->decurry()->arg())));
         return result;
     }
 
@@ -351,7 +462,8 @@ std::optional<MLIRValue> MLIREmitter::try_emit_arith(const App* app, MLIRBlock& 
             default: assert(false && "unhandled math.extrema");
         }
         MLIRValue result{fresh_name(def), t};
-        into.ops.emplace_back(std::make_unique<BinaryFloatOp>(result, kind, a, b));
+        into.ops.emplace_back(
+            std::make_unique<BinaryFloatOp>(result, kind, a, b, fastmath_clause(extr->decurry()->arg())));
         return result;
     }
 
@@ -417,13 +529,38 @@ std::optional<MLIRValue> MLIREmitter::try_emit_arith(const App* app, MLIRBlock& 
         return result;
     }
 
-    // math::exp (exp/log variants — 'lbb' etc. are sub-tag combinations)
-    if (Axm::isa<plug::math::exp>(app)) {
+    if (auto rt = Axm::isa<plug::math::rt>(def)) {
         auto a = get_or_emit(app->arg(), into);
         auto t = types_.convert(def->type());
+        MathUnaryOp::Kind kind;
+        switch (rt.id()) {
+            case plug::math::rt::sq: kind = MathUnaryOp::Kind::Sqrt; break;
+            case plug::math::rt::cb: kind = MathUnaryOp::Kind::Cbrt; break;
+            default: assert(false && "unhandled math.rt");
+        }
         MLIRValue result{fresh_name(def), t};
-        into.ops.emplace_back(std::make_unique<MathUnaryOp>(result, MathUnaryOp::Kind::Exp, a));
+        into.ops.emplace_back(std::make_unique<MathUnaryOp>(result, kind, a));
         return result;
+    }
+
+    // exp10 and the unused sub-tags have no math-dialect counterpart and fall through to the caller's diagnostic.
+    if (auto e = Axm::isa<plug::math::exp>(def)) {
+        std::optional<MathUnaryOp::Kind> kind;
+        switch (e.id()) {
+            case plug::math::exp::exp: kind = MathUnaryOp::Kind::Exp; break;
+            case plug::math::exp::exp2: kind = MathUnaryOp::Kind::Exp2; break;
+            case plug::math::exp::log: kind = MathUnaryOp::Kind::Log; break;
+            case plug::math::exp::log2: kind = MathUnaryOp::Kind::Log2; break;
+            case plug::math::exp::log10: kind = MathUnaryOp::Kind::Log10; break;
+            default: break;
+        }
+        if (kind) {
+            auto a = get_or_emit(app->arg(), into);
+            auto t = types_.convert(def->type());
+            MLIRValue result{fresh_name(def), t};
+            into.ops.emplace_back(std::make_unique<MathUnaryOp>(result, *kind, a));
+            return result;
+        }
     }
     return std::nullopt;
 }

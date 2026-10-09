@@ -5,7 +5,7 @@
 #include <set>
 #include <string>
 
-#include <absl/container/flat_hash_set.h>
+#include <ankerl/unordered_dense.h>
 
 #include <mim/def.h>
 #include <mim/lam.h>
@@ -18,6 +18,7 @@
 #include "mlir/ops/math.h"
 #include "mlir/ops/memref.h"
 #include "mlir/ops/scf.h"
+#include "mlir/ops/tensor_util.h"
 #include "mlir/printer.h"
 #include "mlir/region_tree.h"
 #include "mlir/type_converter.h"
@@ -51,6 +52,10 @@ private:
     std::string fresh_name(std::string prefix);
     bool is_return_callee(const Def* c, const Def* ret_var);
     MLIRValue wrap_as_tensor(const Def* input, MLIRValue in_val, MLIRBlock& into);
+    MLIRValue
+    restore_unit_axes(const Def* def, MLIRValue val, const std::vector<std::optional<int64_t>>& want, MLIRBlock& into);
+    MLIRValue
+    narrow_to_map(MLIRValue val, const AffineMapInfo& info, const AffineExtents& loop_extents, MLIRBlock& into);
 
     //  -------arg seeding -----------
     void seed_dom_op(const Def* op, std::vector<MLIRValue>& args);
@@ -70,16 +75,17 @@ private:
 
     std::optional<MLIRValue> try_emit_tensor_op(const App* app, MLIRBlock& into);
     void emit_linalg_generic(const App* mr_app, MLIRBlock& into);
-    void emit_linalg_body(Lam* body_lam, MLIRBlock& body_bb);
+    void emit_linalg_body(Lam* body_lam, const Def* ret_var, MLIRBlock& body_bb);
+    void emit_linalg_body_scoped(Lam* body_lam, MLIRBlock& body_bb);
 
-    /// Block-argument plan for a fold/epilogue body lam of shape `Fn [x, «n; ins»] → R`.
-    struct MRBodyPlan {
-        std::vector<MLIRValue> ins_args;               ///< one block arg per pack input, in order
-        std::vector<size_t> first_path;                ///< var path of `x` (fold: accumulator, epilogue: folded cell)
-        std::map<std::vector<size_t>, MLIRValue> vals; ///< var path → block arg (before `x` is added)
+    /// Block args for a `[acc, ins]` fold or epilogue lam; the caller orders them ins-then-outs for its own op.
+    struct LinalgBodySeed {
+        MLIRValue acc;
+        std::vector<MLIRValue> ins; ///< one per input element, in parameter order
+        std::map<std::vector<size_t>, MLIRValue> paths;
     };
-    MRBodyPlan plan_mr_body(Lam* body_lam);
-    void emit_mr_body(Lam* body_lam, const std::map<std::vector<size_t>, MLIRValue>& path_vals, MLIRBlock& body_bb);
+    LinalgBodySeed seed_linalg_args(Lam* body_lam, const MLIRType& acc_type);
+    void bind_linalg_args(Lam* body_lam, const LinalgBodySeed& seed);
 
     World& world_;
     std::ostream& os_;
@@ -88,7 +94,7 @@ private:
 
     DefMap<MLIRValue> values_;
     DefMap<std::string> names_;
-    absl::flat_hash_set<std::string> used_names_;
+    ankerl::unordered_dense::set<std::string> used_names_;
 
     const Def* curr_ret_var_ = nullptr;
     int name_counter_        = 0;

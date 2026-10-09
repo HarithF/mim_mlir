@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstring>
 
+#include <algorithm>
 #include <functional>
 
 #include <mim/def.h>
@@ -55,7 +56,7 @@ inline void collect_lit_tensor(const mim::Def* d, std::vector<uint64_t>& out) {
     if (auto pack = d->isa<mim::Pack>()) {
         if (auto n = mim::Lit::isa(pack->arity())) {
             for (size_t i = 0; i < *n; ++i)
-                collect_lit_tensor(pack->body(), out);
+                collect_lit_tensor(pack->elem(), out);
             return;
         }
     }
@@ -75,7 +76,7 @@ inline std::string make_dense_attr(const std::vector<uint64_t>& vals, const MLIR
             for (size_t i = 0; i < dims[dim_idx]; ++i) {
                 if (i) s += ", ";
                 // print as integer if whole number, float otherwise
-                uint64_t v = vals[flat_idx++];
+                uint64_t v = vals.at(flat_idx++);
                 s += format_lit(v, elem);
             }
             return s + "]";
@@ -101,7 +102,7 @@ inline bool is_affine_mod(const Def* d, const Def*& value, const Def*& modulus) 
     if (!app) return false;
 
     auto semiop = Axm::isa<plug::affine::semiop>(app);
-    if (!semiop || semiop.id() != plug::affine::semiop::mod) return false;
+    if (!semiop || semiop.id() != plug::affine::semiop::rem) return false;
     std::tie(value, modulus) = app->arg()->projs<2>();
     return true;
 }
@@ -132,20 +133,20 @@ struct AffineMapInfo {
     /// `linalg.generic` recovers the loop nest by inverting the concatenated maps, so a dim that only ever occurs
     /// inside an expression (`d2 * 2 + d4`) does not count as recovered.
     std::vector<size_t> bare_dims;
+    /// One entry per *emitted* output position: the loop dim it exposes as a bare `d<j>`, if any.
+    /// Lets a caller tell which operand axis a given loop dim indexes.
+    std::vector<std::optional<size_t>> pos_dims;
 };
 
 /// Renders a `%tensor.map_reduce_post` access lam as an MLIR `affine_map` over @p total_loops loop dims.
 /// @p loop_extents bounds those dims (see AffineExtents); it lets the affine folder discard the `mod`/`floordiv`
 /// terms that the loop domain makes redundant.
-/// @p dim_map, when given, renumbers the loop dims of the rendered map (see aff_renumber): the map's
-/// dim list holds only the kept dims, and a dropped (unit-extent) dim reads as the constant 0.
-/// @p keep_results, when given, drops the map's result positions marked `false`: a literal size-1 axis
-/// collapses out of the operand's (nested array) type, so its read coordinate must not be rendered.
+/// @p omit names output positions to leave out, for an operand whose size-1 axes collapsed out of its Mim type.
 inline AffineMapInfo lam_to_affine_map(Lam* lam,
                                        size_t total_loops,
                                        const AffineExtents& loop_extents,
-                                       const std::vector<std::optional<size_t>>* dim_map = nullptr,
-                                       const std::vector<bool>* keep_results             = nullptr) {
+                                       const std::vector<size_t>& omit                     = {},
+                                       const std::vector<std::optional<size_t>>* dim_map = nullptr) {
     assert(lam && lam->is_set());
 
     // infer actual param count
@@ -158,16 +159,13 @@ inline AffineMapInfo lam_to_affine_map(Lam* lam,
     else
         actual_params = 1;
 
-    // the rendered map runs over the kept dims only
+    // With @p dim_map, the map runs over the kept dims only; a dropped (unit-extent) dim reads as 0.
     size_t n_dims = total_loops;
     AffineExtents kept_extents;
     if (dim_map) {
-        n_dims = 0;
         for (size_t i = 0; i < total_loops; ++i)
-            if ((*dim_map)[i]) ++n_dims;
-        kept_extents.resize(n_dims);
-        for (size_t i = 0; i < total_loops; ++i)
-            if ((*dim_map)[i]) kept_extents[*(*dim_map)[i]] = loop_extents[i];
+            if ((*dim_map)[i]) kept_extents.push_back(loop_extents[i]);
+        n_dims = kept_extents.size();
     }
 
     std::string dim_str;
@@ -201,37 +199,37 @@ inline AffineMapInfo lam_to_affine_map(Lam* lam,
 
     std::string result_str;
     std::vector<size_t> bare_dims;
-    size_t n_emitted = 0;
+    std::vector<std::optional<size_t>> pos_dims;
     for (size_t i = 0; i < results.size(); ++i) {
-        if (keep_results && i < keep_results->size() && !(*keep_results)[i]) continue;
-        if (n_emitted++) result_str += ", ";
+        if (std::ranges::find(omit, i) != omit.end()) continue;
+        if (!result_str.empty()) result_str += ", ";
 
         if (auto e = affine_expr(results[i], params, loop_extents)) {
             if (dim_map) e = aff_renumber(e, *dim_map, kept_extents);
             result_str += e->str();
-            if (auto d = std::get_if<AffineDim>(&e->expr)) bare_dims.push_back(d->pos);
+            auto* d = std::get_if<AffineDim>(&e->expr);
+            if (d) bare_dims.push_back(d->pos);
+            pos_dims.push_back(d ? std::optional<size_t>(d->pos) : std::nullopt);
             continue;
         }
+        // A guessed position stays null in `pos_dims` on purpose: nothing may narrow an operand off a guess.
+        pos_dims.push_back(std::nullopt);
 
         // Outside the affine grammar. Fall back to the old "which single loop var drives this position" guess, which
         // is right for pure projections and broadcasts but silently wrong for anything with real index arithmetic —
         // so say so rather than emitting a plausible-looking map.
         std::cerr << "mlir: cannot render access map position " << i << " of '" << lam->sym().str()
                   << "' as an affine expression; falling back to a driving-parameter guess\n";
-        if (auto j = find_driving_param(results[i], params)) {
-            auto pos = dim_map ? (*dim_map)[*j] : std::optional<size_t>(*j);
-            if (pos) {
-                result_str += std::format("d{}", *pos);
-                bare_dims.push_back(*pos);
-            } else {
-                result_str += "0";
-            }
+        if (auto j = find_driving_param(results[i], params); j && (!dim_map || (*dim_map)[*j])) {
+            auto pos = dim_map ? *(*dim_map)[*j] : *j;
+            result_str += std::format("d{}", pos);
+            bare_dims.push_back(pos);
         } else {
             result_str += "0";
         }
     }
 
-    return {std::format("affine_map<({}) -> ({})>", dim_str, result_str), std::move(bare_dims)};
+    return {std::format("affine_map<({}) -> ({})>", dim_str, result_str), std::move(bare_dims), std::move(pos_dims)};
 }
 
 } // namespace mim::mlir_be

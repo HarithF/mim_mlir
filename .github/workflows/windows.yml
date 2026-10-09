@@ -45,10 +45,24 @@ jobs:
         with:
           owner: fodinabor
           repo: FileCheckBuild
-          tag: latest
+          tag: llvmorg-22.1.8
           file: FileCheck-x86_64-win.exe
           path: mimir/bin
           token: ${{ secrets.GITHUB_TOKEN }}
+
+      # The prebuilt FileCheck is a MinGW build; bash no longer has its runtime DLLs in PATH, so stage them next to it.
+      - name: Stage MinGW runtime DLLs
+        shell: pwsh
+        run: |
+          foreach ($dll in 'libstdc++-6.dll', 'libgcc_s_seh-1.dll', 'libwinpthread-1.dll') {
+              $src = (Get-Command $dll).Source
+              Write-Host "$dll -> $src"
+              Copy-Item $src mimir/bin/
+          }
+
+      - name: Verify FileCheck
+        shell: bash
+        run: mimir/bin/FileCheck-x86_64-win.exe --version
 
       - name: Configure
         shell: cmd

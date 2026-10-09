@@ -39,6 +39,29 @@ public:
     }
 };
 
+/// `%r = tensor.extract_slice %src[0, …] [sizes] [1, …] : tensor<…> to tensor<…>`.
+/// Only static, unit-stride prefixes are emitted, which is all a narrowed access map needs.
+class TensorExtractSliceOp : public MLIROp {
+public:
+    TensorExtractSliceOp(MLIRValue result, MLIRValue src)
+        : MLIROp({std::move(result)}, {std::move(src)}) {}
+
+    void print(Printer& p) const override {
+        auto& shape = std::get<MLIRTensorType>(results_[0].type).shape;
+        std::string offsets, sizes, strides;
+        for (size_t i = 0; i < shape.size(); ++i) {
+            assert(shape[i] && "tensor.extract_slice needs a static result shape");
+            offsets += (i ? ", " : "");
+            offsets += "0";
+            sizes += (i ? ", " : "") + std::to_string(*shape[i]);
+            strides += (i ? ", " : "");
+            strides += "1";
+        }
+        p.line("{} = tensor.extract_slice {}[{}] [{}] [{}] : {} to {}", results_[0].name, operands_[0].name, offsets,
+               sizes, strides, print_type(operands_[0].type), print_type(results_[0].type));
+    }
+};
+
 /// `%r = tensor.collapse_shape %src [[0, 1], [2]] : tensor<…> into tensor<…>`.
 /// Each reassociation group is merged into one output axis; an empty group list collapses to rank 0.
 class TensorCollapseShapeOp : public MLIROp {
@@ -57,6 +80,40 @@ public:
         }
         p.line("{} = tensor.collapse_shape {} [{}] : {} into {}", results_[0].name, operands_[0].name, groups,
                print_type(operands_[0].type), print_type(results_[0].type));
+    }
+
+private:
+    std::vector<std::vector<int64_t>> reassoc_;
+};
+
+/// `%r = tensor.expand_shape %src [[0], [1, 2, 3]] output_shape [3, 2, 1, 1] : tensor<…> into tensor<…>`.
+/// The inverse of TensorCollapseShapeOp: each reassociation group names the result axes one source axis splits into,
+/// and an empty group list expands a rank-0 source. `output_shape` repeats the result extents, so every one of them
+/// has to be static here (a dynamic axis would need a `tensor.dim` operand).
+class TensorExpandShapeOp : public MLIROp {
+public:
+    TensorExpandShapeOp(MLIRValue result, MLIRValue src, std::vector<std::vector<int64_t>> reassoc)
+        : MLIROp({std::move(result)}, {std::move(src)})
+        , reassoc_(std::move(reassoc)) {}
+
+    void print(Printer& p) const override {
+        std::string groups;
+        for (size_t g = 0; g < reassoc_.size(); ++g) {
+            groups += (g ? ", [" : "[");
+            for (size_t i = 0; i < reassoc_[g].size(); ++i)
+                groups += (i ? ", " : "") + std::to_string(reassoc_[g][i]);
+            groups += "]";
+        }
+
+        std::string out_shape;
+        auto& shape = std::get<MLIRTensorType>(results_[0].type).shape;
+        for (size_t i = 0; i < shape.size(); ++i) {
+            assert(shape[i] && "tensor.expand_shape needs a static output_shape");
+            out_shape += (i ? ", " : "") + std::to_string(*shape[i]);
+        }
+
+        p.line("{} = tensor.expand_shape {} [{}] output_shape [{}] : {} into {}", results_[0].name, operands_[0].name,
+               groups, out_shape, print_type(operands_[0].type), print_type(results_[0].type));
     }
 
 private:

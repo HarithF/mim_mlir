@@ -1,6 +1,7 @@
 #pragma once
 #include <cmath>
 
+#include <string>
 #include <string_view>
 
 #include "mlir/printer.h"
@@ -84,13 +85,14 @@ public:
         Minimum, // arith.minimumf  (IEEE 754)
     };
 
-    BinaryFloatOp(MLIRValue result, Kind kind, MLIRValue lhs, MLIRValue rhs)
+    BinaryFloatOp(MLIRValue result, Kind kind, MLIRValue lhs, MLIRValue rhs, std::string fastmath = {})
         : MLIROp({std::move(result)}, {std::move(lhs), std::move(rhs)})
-        , kind_(kind) {}
+        , kind_(kind)
+        , fastmath_(std::move(fastmath)) {}
 
     void print(Printer& p) const override {
-        p.line("{} = arith.{} {}, {} : {}", results_[0].name, mnemonic(kind_), operands_[0].name, operands_[1].name,
-               print_type(results_[0].type));
+        p.line("{} = arith.{} {}, {}{} : {}", results_[0].name, mnemonic(kind_), operands_[0].name, operands_[1].name,
+               fastmath_.empty() ? "" : " " + fastmath_, print_type(results_[0].type));
     }
 
 private:
@@ -110,6 +112,7 @@ private:
     }
 
     Kind kind_;
+    std::string fastmath_;
 };
 
 class SelectOp : public MLIROp {
@@ -208,7 +211,7 @@ public:
         : MLIROp({std::move(result)}, {std::move(operand)}) {}
 
     void print(Printer& p) const override {
-        p.line("{} = arith.index_cast {} : {} to {}", results_[0].name, operands_[0].name,
+        p.line("{} = arith.index_castui {} : {} to {}", results_[0].name, operands_[0].name,
                print_type(operands_[0].type), print_type(results_[0].type));
     }
 };

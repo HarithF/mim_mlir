@@ -1,0 +1,31 @@
+// RUN: rm -rf %t && mkdir -p %t && cd %t && %mim -p mlir %s && %FileCheck %s < %{s:stem}.mlir
+plugin math;
+plugin tensor;
+plugin affine;
+
+let f32 = math.f32;
+let F32 = math.F32;
+
+fun add_fun (acc y: F32)@tt: F32 = return (math.arith.add 0 @f32 (acc, y));
+lam id1i (i j: affine.Index): «1; affine.Index» = i;
+lam id2 (i j: affine.Index): «2; affine.Index» = (i, j);
+
+/// `x ↦ x * ¼`: the scale that turns a windowed sum into a mean. `0x3E800000` is `0.25f` — a decimal
+/// F32 literal lowers to `0.0` (see lit/tensor/hlo_train.mim).
+lam quarter (x: F32): F32 = math.arith.mul 0 @f32 (x, 0x3E800000:F32);
+
+extern con main_mean (arg0: «8; «4; F32»», return: Cn «8; F32») =
+    let sum = tensor.map_reduce (8, (8, 4)) (add_fun, 0:F32) id1i id2 (tensor.buf arg0);
+    return (tensor.unary quarter sum);
+
+// The reduction folds the sum...
+// CHECK: linalg.generic
+// CHECK-SAME: iterator_types = ["parallel", "reduction"]
+// CHECK: arith.addf
+
+// ...and `fuse_tensor` sinks the scale into the `post` slot. Its only other operand is a literal, so the
+// epilogue-input pack is EMPTY — keying the skip on that pack's size dropped the divisor and left a bare sum.
+// CHECK: linalg.generic
+// CHECK-SAME: iterator_types = ["parallel"]
+// CHECK: arith.constant 0.25
+// CHECK: arith.mulf
