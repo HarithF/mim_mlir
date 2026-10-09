@@ -8,7 +8,8 @@ on:
 jobs:
   build-and-test:
     name: Build and test ${{matrix.build-type}} mode
-    runs-on: ubuntu-latest
+    # MimIR needs gcc-15's libstdc++ (C++23 range members), which ubuntu-24.04 lacks.
+    runs-on: ubuntu-26.04
     strategy:
       matrix:
         build-type: [Debug, Release]
@@ -32,7 +33,7 @@ jobs:
       - name: Install valgrind, lit, llvm, and psutil
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-14 g++-14 valgrind llvm-20-tools clang-20
+          sudo apt-get install -y gcc-15 g++-15 valgrind llvm-20-tools clang-20 clang
           sudo pip install lit psutil
 
       - name: Setup ccache
@@ -57,7 +58,7 @@ jobs:
       - name: Configure Release
         if: matrix.build-type == 'Release'
         run: |
-          CC=gcc-14 CXX=g++-14                            \
+          CC=gcc-15 CXX=g++-15                            \
           cmake -S mimir -B mimir/build            \
                 -DCMAKE_BUILD_TYPE=${{matrix.build-type}} \
                 -DBUILD_TESTING=ON                        \
