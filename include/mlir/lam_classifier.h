@@ -28,7 +28,7 @@ public:
         return it == results_.end() ? LamKind::JoinBlock : it->second;
     }
 
-    // For MapReduceBody lams — returns the containing %tensor.map_reduce App.
+    // For MapReduceBody lams — returns the containing %tensor.map_reduce_post App.
     const App* map_reduce_app_of(const Lam* lam) const {
         auto it = map_reduce_apps_.find(const_cast<Lam*>(lam));
         return it == map_reduce_apps_.end() ? nullptr : it->second;

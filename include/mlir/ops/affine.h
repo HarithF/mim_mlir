@@ -81,6 +81,13 @@ AffineExprRef aff_mod(AffineExprRef a, int64_t c, const AffineExtents& extents);
 /// Range of the values @p e can take given the loop @p extents.
 AffineRange aff_range(const AffineExprRef& e, const AffineExtents& extents);
 
+/// Rewrites every `d<old>` per @p dim_map: `dim_map[old]` is the new position, or absent for a dropped
+/// (unit-extent) dim, which becomes the constant 0. Re-folds on the way up via the smart constructors,
+/// so a `d2 + d3` whose `d3` is dropped comes out as the plain `d2` again. @p new_extents bounds the
+/// renumbered dims (for the div/mod folds).
+AffineExprRef aff_renumber(const AffineExprRef& e, const std::vector<std::optional<size_t>>& dim_map,
+                           const AffineExtents& new_extents);
+
 /// Translates the `%affine` index expression @p def into an AffineExpr.
 AffineExprRef affine_expr(const Def* def, const std::vector<const Def*>& params, const AffineExtents& extents);
 

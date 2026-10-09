@@ -45,13 +45,15 @@ extern fun bias_nchw (t: «2, 3, 4, 4; F32», bias: «3; F32»): «2, 3, 4, 4; F
 // CHECK-LABEL: func.func public @conv_same(%x: tensor<2x2x4x4xf32>, %w: tensor<3x2x3x3xf32>)
 // CHECK: tensor.pad %x low[0, 0, 1, 1] high[0, 0, 1, 1]
 // CHECK: linalg.generic
-// CHECK-SAME: "reduction", "reduction", "reduction", "reduction"]
+// CHECK-SAME: affine_map<(d0, d1, d2, d3, d4, d5, d6) -> (d0, d4, d2 + d5, d3 + d6)>
+// CHECK-SAME: affine_map<(d0, d1, d2, d3, d4, d5, d6) -> (d1, d4, d5, d6)>
+// CHECK-SAME: iterator_types = ["parallel", "parallel", "parallel", "parallel", "reduction", "reduction", "reduction"]
 // CHECK: arith.mulf
 // CHECK: arith.addf
 // CHECK: func.return {{.*}} : tensor<2x3x4x4xf32>
 
 // CHECK-LABEL: func.func public @flatten(%x: tensor<2x2x4x4xf32>)
-// CHECK: affine_map<(d0, d1) -> (d0, (d1 + d0 * 32) floordiv 16 mod 2, (d1 + d0 * 32) floordiv 4 mod 4, d1 mod 4)>
+// CHECK: affine_map<(d0, d1) -> (d0, d1 floordiv 16, d1 floordiv 4 mod 4, d1 mod 4)>
 
 // CHECK-LABEL: func.func public @pool_max(%x: tensor<2x2x4x4xf32>)
 // CHECK: affine_map<(d0, d1, d2, d3, d4, d5) -> (d0, d1, d2 * 2 + d4, d3 * 2 + d5)>

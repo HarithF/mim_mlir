@@ -297,7 +297,6 @@ void MLIREmitter::emit_linalg_generic(const App* app, MLIRBlock& into) {
     size_t n_post      = *nps_opt;
     size_t ro          = *Ro_opt;
     size_t total_loops = *Rn_opt;
-    size_t rr          = total_loops - ro;
 
     auto proj_input
         = [&](size_t i) -> const Def* { return n_inputs == 1 ? inputs_pack : inputs_pack->proj(n_inputs, i); };
@@ -319,6 +318,19 @@ void MLIREmitter::emit_linalg_generic(const App* app, MLIRBlock& into) {
         else
             loop_extents.push_back(std::nullopt);
     }
+
+    // A strip-mine by 1 leaves loops that run exactly once; their dims read as 0 and drop out of the op.
+    std::vector<std::optional<size_t>> dim_map(total_loops);
+    AffineExtents kept_extents;
+    size_t ro_kept = 0;
+    for (size_t i = 0; i < total_loops; ++i) {
+        if (loop_extents[i] == 1) continue;
+        dim_map[i] = kept_extents.size();
+        kept_extents.push_back(loop_extents[i]);
+        if (i < ro) ++ro_kept;
+    }
+    auto* dim_map_p = kept_extents.size() == total_loops ? nullptr : &dim_map;
+    size_t n_loops  = kept_extents.size();
 
     // ── Result type from So and To ────────────────────────────────────────
     std::vector<std::optional<int64_t>> res_shape;
@@ -343,7 +355,7 @@ void MLIREmitter::emit_linalg_generic(const App* app, MLIRBlock& into) {
     // costs nothing and the results are reused for `indexing_maps` below.
     std::vector<AffineMapInfo> in_map_info;
     for (size_t i = 0; i < n_inputs; ++i)
-        in_map_info.push_back(lam_to_affine_map(proj_map_lam(i), total_loops, loop_extents));
+        in_map_info.push_back(lam_to_affine_map(proj_map_lam(i), total_loops, loop_extents, {}, dim_map_p));
 
     std::vector<MLIRValue> ins;
     for (size_t i = 0; i < n_inputs; ++i) {
@@ -360,7 +372,7 @@ void MLIREmitter::emit_linalg_generic(const App* app, MLIRBlock& into) {
             in_val = restore_unit_axes(in, std::move(in_val), in_shape, into);
         }
 
-        in_val = narrow_to_map(std::move(in_val), in_map_info[i], loop_extents, into);
+        in_val = narrow_to_map(std::move(in_val), in_map_info[i], kept_extents, into);
         ins.push_back(std::move(in_val));
     }
 
@@ -392,7 +404,7 @@ void MLIREmitter::emit_linalg_generic(const App* app, MLIRBlock& into) {
 
     for (size_t i = 0; i < n_inputs; ++i)
         add_map(in_map_info[i]);
-    auto out_map = lam_to_affine_map(map_out, total_loops, loop_extents);
+    auto out_map = lam_to_affine_map(map_out, total_loops, loop_extents, {}, dim_map_p);
     add_map(out_map);
 
     // ── Shape-only operand for loop dims no map exposes ───────────────────
@@ -401,7 +413,7 @@ void MLIREmitter::emit_linalg_generic(const App* app, MLIRBlock& into) {
     // solve this by taking the kernel as a shape-only `ins` operand; %tensor.pool has no such operand (the window is
     // a literal), so synthesize one. Its element is never read — it exists purely to name the dims.
     std::vector<size_t> missing;
-    for (size_t i = 0; i < total_loops; ++i)
+    for (size_t i = 0; i < n_loops; ++i)
         if (std::ranges::find(bare_dims, i) == bare_dims.end()) missing.push_back(i);
 
     std::optional<MLIRValue> shape_arg;
@@ -410,7 +422,7 @@ void MLIREmitter::emit_linalg_generic(const App* app, MLIRBlock& into) {
         shape_tensor.elem = std::make_shared<MLIRTypeNode>(res_elem_type);
         std::string dims;
         for (size_t i = 0; i < missing.size(); ++i) {
-            shape_tensor.shape.push_back(loop_extents[missing[i]]);
+            shape_tensor.shape.push_back(kept_extents[missing[i]]);
             dims += (i ? ", " : "") + std::format("d{}", missing[i]);
         }
 
@@ -420,7 +432,7 @@ void MLIREmitter::emit_linalg_generic(const App* app, MLIRBlock& into) {
 
         // Slot the map in ahead of the output map: `indexing_maps` must follow ins-then-outs order.
         std::string dim_str;
-        for (size_t i = 0; i < total_loops; ++i)
+        for (size_t i = 0; i < n_loops; ++i)
             dim_str += (i ? ", " : "") + std::format("d{}", i);
         indexing_maps.back() = std::format("affine_map<({}) -> ({})>", dim_str, dims);
         indexing_maps.push_back(out_map.str);
@@ -430,10 +442,8 @@ void MLIREmitter::emit_linalg_generic(const App* app, MLIRBlock& into) {
 
     // ── Iterator types ────────────────────────────────────────────────────
     std::vector<std::string> iterator_types;
-    for (size_t i = 0; i < ro; ++i)
-        iterator_types.push_back("parallel");
-    for (size_t i = 0; i < rr; ++i)
-        iterator_types.push_back("reduction");
+    for (size_t i = 0; i < n_loops; ++i)
+        iterator_types.push_back(i < ro_kept ? "parallel" : "reduction");
 
     // ── Body ──────────────────────────────────────────────────────────────
     auto* body_lam = comb->isa_mut<Lam>();

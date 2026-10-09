@@ -297,6 +297,15 @@ AffineExprRef aff_floordiv(AffineExprRef a, int64_t c, const AffineExtents& exte
         return sum_of(parts);
     }
 
+    // An exact multiple passes through the floor whatever the rest carries: `(m + x) floordiv c → m/c + x floordiv c`.
+    if (!sp.even.empty() && !sp.rest.empty()) {
+        std::vector<AffineExprRef> parts;
+        for (auto& t : sp.even)
+            parts.push_back(exact_div(t, c));
+        parts.push_back(aff_floordiv(sum_of(sp.rest), c, extents));
+        return sum_of(parts);
+    }
+
     return bin(AffineBinOp::FloorDiv, std::move(a), aff_const(c));
 }
 
@@ -328,6 +337,38 @@ AffineExprRef aff_mod(AffineExprRef a, int64_t c, const AffineExtents& extents) 
     }
 
     return bin(AffineBinOp::Mod, std::move(a), aff_const(c));
+}
+
+AffineExprRef aff_renumber(const AffineExprRef& e,
+                           const std::vector<std::optional<size_t>>& dim_map,
+                           const AffineExtents& new_extents) {
+    if (auto d = std::get_if<AffineDim>(&e->expr)) {
+        if (d->pos < dim_map.size() && dim_map[d->pos]) return aff_dim(*dim_map[d->pos]);
+        return aff_const(0);
+    }
+    if (std::get_if<AffineConst>(&e->expr)) return e;
+
+    auto& b = std::get<AffineBin>(e->expr);
+    auto l  = aff_renumber(b.lhs, dim_map, new_extents);
+    auto r  = aff_renumber(b.rhs, dim_map, new_extents);
+    auto rc = const_val(r);
+    switch (b.op) {
+        case AffineBinOp::Add: return aff_add(std::move(l), std::move(r));
+        case AffineBinOp::Sub: return aff_sub(std::move(l), std::move(r));
+        case AffineBinOp::Mul:
+            if (rc) return aff_mul(std::move(l), *rc);
+            break;
+        case AffineBinOp::FloorDiv:
+            if (rc) return aff_floordiv(std::move(l), *rc, new_extents);
+            break;
+        case AffineBinOp::CeilDiv:
+            if (rc) return aff_ceildiv(std::move(l), *rc, new_extents);
+            break;
+        case AffineBinOp::Mod:
+            if (rc) return aff_mod(std::move(l), *rc, new_extents);
+            break;
+    }
+    return bin(b.op, std::move(l), std::move(r));
 }
 
 // ----- translation from %affine -----

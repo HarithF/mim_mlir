@@ -145,7 +145,8 @@ struct AffineMapInfo {
 inline AffineMapInfo lam_to_affine_map(Lam* lam,
                                        size_t total_loops,
                                        const AffineExtents& loop_extents,
-                                       const std::vector<size_t>& omit = {}) {
+                                       const std::vector<size_t>& omit                     = {},
+                                       const std::vector<std::optional<size_t>>* dim_map = nullptr) {
     assert(lam && lam->is_set());
 
     // infer actual param count
@@ -158,9 +159,17 @@ inline AffineMapInfo lam_to_affine_map(Lam* lam,
     else
         actual_params = 1;
 
-    // dim string uses total_loops
+    // With @p dim_map, the map runs over the kept dims only; a dropped (unit-extent) dim reads as 0.
+    size_t n_dims = total_loops;
+    AffineExtents kept_extents;
+    if (dim_map) {
+        for (size_t i = 0; i < total_loops; ++i)
+            if ((*dim_map)[i]) kept_extents.push_back(loop_extents[i]);
+        n_dims = kept_extents.size();
+    }
+
     std::string dim_str;
-    for (size_t i = 0; i < total_loops; ++i)
+    for (size_t i = 0; i < n_dims; ++i)
         dim_str += (i ? ", " : "") + std::format("d{}", i);
 
     // collect actual params using actual_params
@@ -196,6 +205,7 @@ inline AffineMapInfo lam_to_affine_map(Lam* lam,
         if (!result_str.empty()) result_str += ", ";
 
         if (auto e = affine_expr(results[i], params, loop_extents)) {
+            if (dim_map) e = aff_renumber(e, *dim_map, kept_extents);
             result_str += e->str();
             auto* d = std::get_if<AffineDim>(&e->expr);
             if (d) bare_dims.push_back(d->pos);
@@ -210,9 +220,10 @@ inline AffineMapInfo lam_to_affine_map(Lam* lam,
         // so say so rather than emitting a plausible-looking map.
         std::cerr << "mlir: cannot render access map position " << i << " of '" << lam->sym().str()
                   << "' as an affine expression; falling back to a driving-parameter guess\n";
-        if (auto j = find_driving_param(results[i], params)) {
-            result_str += std::format("d{}", *j);
-            bare_dims.push_back(*j);
+        if (auto j = find_driving_param(results[i], params); j && (!dim_map || (*dim_map)[*j])) {
+            auto pos = dim_map ? *(*dim_map)[*j] : *j;
+            result_str += std::format("d{}", pos);
+            bare_dims.push_back(pos);
         } else {
             result_str += "0";
         }
