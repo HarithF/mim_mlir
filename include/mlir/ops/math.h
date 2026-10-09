@@ -1,4 +1,6 @@
 #pragma once
+#include <string>
+
 #include "mlir/printer.h"
 #include "mlir/region_tree.h"
 
@@ -20,12 +22,14 @@ public:
         Abs,
     };
 
-    MathUnaryOp(MLIRValue result, Kind kind, MLIRValue operand)
+    MathUnaryOp(MLIRValue result, Kind kind, MLIRValue operand, std::string fastmath = {})
         : MLIROp({std::move(result)}, {std::move(operand)})
-        , kind_(kind) {}
+        , kind_(kind)
+        , fastmath_(std::move(fastmath)) {}
 
     void print(Printer& p) const override {
-        p.line("{} = {} {} : {}", results_[0].name, mnemonic(kind_), operands_[0].name, print_type(results_[0].type));
+        p.line("{} = {} {}{} : {}", results_[0].name, mnemonic(kind_), operands_[0].name,
+               fastmath_.empty() ? "" : " " + fastmath_, print_type(results_[0].type));
     }
 
 private:
@@ -47,6 +51,7 @@ private:
     }
 
     Kind kind_;
+    std::string fastmath_;
 };
 
 class MathIsFiniteOp : public MLIROp {

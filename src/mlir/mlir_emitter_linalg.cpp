@@ -18,6 +18,8 @@ namespace mim::mlir_be {
 std::optional<MLIRValue> MLIREmitter::try_emit_tensor_op(const App* app, MLIRBlock& into) {
     auto* def = app;
 
+    if (Axm::isa<plug::tensor::buf>(app)) return get_or_emit(app->arg(), into);
+
     if (Axm::isa<plug::tensor::map_reduce_post>(app)) {
         emit_linalg_generic(app, into);
         return values_[def];
@@ -149,42 +151,6 @@ std::optional<MLIRValue> MLIREmitter::try_emit_tensor_op(const App* app, MLIRBlo
         return result;
     }
 
-    if (auto get_ax = Axm::isa<plug::tensor::get>(app)) {
-        // %tensor.get @(T, r, s) (arr, index)
-
-        auto* arr_def = app->arg()->proj(2, 0);
-        auto* idx_def = app->arg()->proj(2, 1);
-
-        auto arr_val  = get_or_emit(arr_def, into);
-        auto res_type = types_.convert(def->type());
-
-        // unpack index tuple - each element is an Idx literal, cast to index
-        std::vector<MLIRValue> indices;
-        if (auto sigma = idx_def->type()->isa<Sigma>()) {
-            size_t n = sigma->num_ops();
-            for (size_t i = 0; i < n; ++i) {
-                auto elem     = idx_def->proj(n, i);
-                auto elem_val = get_or_emit(elem, into);
-                indices.push_back(types_.to_index(elem_val, into, fresh_name("%idx")));
-            }
-        } else if (auto arr = idx_def->type()->isa<Arr>()) {
-            if (auto n = Lit::isa(arr->arity())) {
-                for (size_t i = 0; i < *n; ++i) {
-                    auto elem_val = get_or_emit(idx_def->proj(*n, i), into);
-                    indices.push_back(types_.to_index(elem_val, into, fresh_name("%idx")));
-                }
-            }
-        } else {
-            // rank-1: bare Idx
-            auto elem_val = get_or_emit(idx_def, into);
-            indices.push_back(types_.to_index(elem_val, into, fresh_name("%idx")));
-        }
-
-        MLIRValue result{fresh_name(def), res_type};
-        into.ops.emplace_back(std::make_unique<TensorExtractOp>(result, arr_val, std::move(indices)));
-        return result;
-    }
-
     return std::nullopt;
 }
 
@@ -245,49 +211,53 @@ MLIRValue MLIREmitter::restore_unit_axes(const Def* def,
     auto have = std::get<MLIRTensorType>(val.type).shape;
     if (have == want) return val;
 
-    if (have.size() > want.size()) {
-        std::cerr << "mlir: operand " << val.name << " has rank " << have.size() << " but its access map expects "
-                  << want.size() << "; not a collapsed-unit-axis mismatch, leaving it alone\n";
-        return val;
-    }
+    // The operand may also carry unit axes the map lacks - a producer materializes its full shape - so the
+    // matching runs from whichever side has more axes, and that side's extra axes must all be 1.
+    bool expand = have.size() < want.size();
+    auto& lng   = expand ? want : have;
+    auto& shrt  = expand ? have : want;
 
-    // One group per source axis, each closed by the axis it maps to; the inserted unit axes join the group to their
-    // left, except leading ones, which have no group yet and so join the first. `have` is matched greedily against
-    // `want`: an axis that agrees consumes a source axis, anything else must be an inserted singleton.
+    // One group per short-side axis, each closed by the long-side axis it maps to; the extra unit axes join the group
+    // to their left, except leading ones, which have no group yet and so join the first. Matching is greedy: an axis
+    // that agrees consumes a short-side axis, anything else must be a singleton.
     std::vector<std::vector<int64_t>> reassoc;
     size_t src = 0;
-    for (size_t i = 0; i < want.size(); ++i) {
-        // A rank-0 source splits into no groups at all — `[]` — and every result axis is an inserted 1.
-        if (!have.empty()) {
+    for (size_t i = 0; i < lng.size(); ++i) {
+        // A rank-0 short side has no groups at all - `[]` - and every long-side axis is a 1.
+        if (!shrt.empty()) {
             if (reassoc.empty()) reassoc.emplace_back();
             reassoc.back().push_back(static_cast<int64_t>(i));
         }
-        if (src < have.size() && have[src] == want[i]) {
-            if (++src < have.size()) reassoc.emplace_back();
-        } else if (want[i] != 1) {
+        if (src < shrt.size() && shrt[src] == lng[i]) {
+            if (++src < shrt.size()) reassoc.emplace_back();
+        } else if (lng[i] != 1) {
             std::cerr << "mlir: cannot reconcile operand " << val.name << " with the shape its access map expects; "
                       << "axis " << i << " is neither a match nor a collapsed size-1 axis\n";
             return val;
         }
     }
-    if (src != have.size()) {
+    if (src != shrt.size()) {
         std::cerr << "mlir: cannot reconcile operand " << val.name << " with the shape its access map expects; "
-                  << have.size() - src << " of its axes went unmatched\n";
+                  << shrt.size() - src << " of its axes went unmatched\n";
         return val;
     }
 
-    MLIRTensorType expanded;
-    expanded.shape = want;
-    expanded.elem  = std::get<MLIRTensorType>(val.type).elem;
+    MLIRTensorType reshaped;
+    reshaped.shape = want;
+    reshaped.elem  = std::get<MLIRTensorType>(val.type).elem;
 
-    // The same Def can feed several `linalg.generic`s, each expanding it for itself, so the name needs a
+    // The same Def can feed several `linalg.generic`s, each reshaping it for itself, so the name needs a
     // disambiguator of its own — `fresh_name(def)` is memoized and hands out the same base every time.
-    auto name = fresh_name(def) + ".expanded";
+    auto suffix = expand ? ".expanded" : ".collapsed";
+    auto name   = fresh_name(def) + suffix;
     for (int i = 1; !used_names_.insert(name).second; ++i)
-        name = std::format("{}.expanded_{}", fresh_name(def), i);
+        name = std::format("{}{}_{}", fresh_name(def), suffix, i);
 
-    MLIRValue result{std::move(name), MLIRType{std::move(expanded)}};
-    into.ops.emplace_back(std::make_unique<TensorExpandShapeOp>(result, std::move(val), std::move(reassoc)));
+    MLIRValue result{std::move(name), MLIRType{std::move(reshaped)}};
+    if (expand)
+        into.ops.emplace_back(std::make_unique<TensorExpandShapeOp>(result, std::move(val), std::move(reassoc)));
+    else
+        into.ops.emplace_back(std::make_unique<TensorCollapseShapeOp>(result, std::move(val), std::move(reassoc)));
     return result;
 }
 
@@ -610,7 +580,7 @@ MLIREmitter::LinalgBodySeed MLIREmitter::seed_linalg_args(Lam* body_lam, const M
                 for (size_t i = 0; i < *n; ++i) {
                     auto p = ins_path;
                     p.push_back(i);
-                    MLIRValue v{fresh_name("%in_"), types_.convert(a->body())};
+                    MLIRValue v{fresh_name("%in_"), types_.convert(a->elem())};
                     seed.ins.push_back(v);
                     put(std::move(p), v);
                 }
@@ -638,7 +608,7 @@ MLIREmitter::LinalgBodySeed MLIREmitter::seed_linalg_args(Lam* body_lam, const M
             acc_p.push_back(0);
             auto ins_p = arg_path;
             ins_p.push_back(1);
-            MLIRValue v{fresh_name("%in_"), types_.convert(a->body())};
+            MLIRValue v{fresh_name("%in_"), types_.convert(a->elem())};
             seed.ins.push_back(v);
             put(std::move(ins_p), v);
             seed.acc = MLIRValue{fresh_name("%acc_"), acc_type};

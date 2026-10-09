@@ -56,7 +56,7 @@ inline void collect_lit_tensor(const mim::Def* d, std::vector<uint64_t>& out) {
     if (auto pack = d->isa<mim::Pack>()) {
         if (auto n = mim::Lit::isa(pack->arity())) {
             for (size_t i = 0; i < *n; ++i)
-                collect_lit_tensor(pack->body(), out);
+                collect_lit_tensor(pack->elem(), out);
             return;
         }
     }
@@ -102,7 +102,7 @@ inline bool is_affine_mod(const Def* d, const Def*& value, const Def*& modulus) 
     if (!app) return false;
 
     auto semiop = Axm::isa<plug::affine::semiop>(app);
-    if (!semiop || semiop.id() != plug::affine::semiop::mod) return false;
+    if (!semiop || semiop.id() != plug::affine::semiop::rem) return false;
     std::tie(value, modulus) = app->arg()->projs<2>();
     return true;
 }

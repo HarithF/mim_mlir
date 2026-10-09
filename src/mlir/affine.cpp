@@ -60,6 +60,18 @@ bool divides(const AffineExprNode& e, int64_t c) {
     return false;
 }
 
+/// Collects the addends of an Add chain, so the folds below do not depend on how the sum was nested.
+/// A linearized index arrives as a left-nested `((t0 + t1) + t2) + t3`, where no single addend is on its own a
+/// multiple of the stride being divided by — matching a binary Add misses every real delinearize.
+void flatten_add(const AffineExprRef& e, std::vector<AffineExprRef>& terms) {
+    if (auto b = std::get_if<AffineBin>(&e->expr); b && b->op == AffineBinOp::Add) {
+        flatten_add(b->lhs, terms);
+        flatten_add(b->rhs, terms);
+        return;
+    }
+    terms.push_back(e);
+}
+
 AffineExprRef make(AffineExpr e) { return std::make_shared<const AffineExprNode>(std::move(e)); }
 
 AffineExprRef bin(AffineBinOp op, AffineExprRef a, AffineExprRef b) {
@@ -172,6 +184,63 @@ AffineExprRef aff_mul(AffineExprRef a, int64_t c) {
     return bin(AffineBinOp::Mul, std::move(a), aff_const(c));
 }
 
+namespace {
+
+/// @p e divided by @p c, for an @p e that `divides` established is an exact multiple.
+AffineExprRef exact_div(const AffineExprRef& e, int64_t c) {
+    if (c == 1) return e;
+    if (auto k = const_val(e)) return aff_const(*k / c);
+
+    auto& b = std::get<AffineBin>(e->expr);
+    if (b.op == AffineBinOp::Mul) {
+        // One side is constant by construction.
+        if (auto k = const_val(b.rhs); k && *k % c == 0) return aff_mul(b.lhs, *k / c);
+        if (auto k = const_val(b.lhs); k && *k % c == 0) return aff_mul(b.rhs, *k / c);
+        if (auto k = const_val(b.rhs)) return aff_mul(exact_div(b.lhs, c), *k);
+        return aff_mul(exact_div(b.rhs, c), *const_val(b.lhs));
+    }
+    auto l = exact_div(b.lhs, c), r = exact_div(b.rhs, c);
+    return b.op == AffineBinOp::Sub ? aff_sub(std::move(l), std::move(r)) : aff_add(std::move(l), std::move(r));
+}
+
+/// The constant an addend is scaled by (1 when it is not scaled), i.e. its stride in a linearized index.
+int64_t term_stride(const AffineExprNode& e) {
+    if (auto b = std::get_if<AffineBin>(&e.expr); b && b->op == AffineBinOp::Mul) {
+        if (auto k = const_val(b->rhs)) return *k;
+        if (auto k = const_val(b->lhs)) return *k;
+    }
+    return 1;
+}
+
+AffineExprRef sum_of(const std::vector<AffineExprRef>& terms) {
+    AffineExprRef acc;
+    for (auto& t : terms)
+        acc = acc ? aff_add(acc, t) : t;
+    return acc ? acc : aff_const(0);
+}
+
+/// Splits @p e's addends into those that are multiples of @p c and the rest, and reports whether the rest can
+/// perturb a division by @p c. Both `floordiv` and `mod` turn on exactly this question.
+struct Split {
+    std::vector<AffineExprRef> even, rest;
+    bool rest_carries;
+};
+
+Split split_by(const AffineExprRef& e, int64_t c, const AffineExtents& extents) {
+    std::vector<AffineExprRef> terms;
+    flatten_add(e, terms);
+
+    Split out;
+    for (auto& t : terms)
+        (divides(*t, c) ? out.even : out.rest).push_back(t);
+
+    auto r           = aff_range(sum_of(out.rest), extents);
+    out.rest_carries = r.lo < 0 || r.hi >= c;
+    return out;
+}
+
+} // namespace
+
 AffineExprRef aff_floordiv(AffineExprRef a, int64_t c, const AffineExtents& extents) {
     if (c == 1) return a;
     if (c <= 0) return bin(AffineBinOp::FloorDiv, std::move(a), aff_const(c));
@@ -185,20 +254,49 @@ AffineExprRef aff_floordiv(AffineExprRef a, int64_t c, const AffineExtents& exte
         // `x * c floordiv c → x`, and more generally peel a factor off an even multiple.
         if (b->op == AffineBinOp::Mul)
             if (auto k = const_val(b->rhs); k && *k % c == 0) return aff_mul(b->lhs, *k / c);
-
-        // `(hi + lo) floordiv c → hi floordiv c` when `c` divides `hi` and `lo` cannot carry into it.
-        // This is what makes a delinearize-of-linearize round trip collapse back to the plain loop dim.
-        if (b->op == AffineBinOp::Add) {
-            for (auto [even, rest] : {
-                     std::pair{b->lhs, b->rhs},
-                     std::pair{b->rhs, b->lhs}
-            }) {
-                if (!divides(*even, c)) continue;
-                auto rest_range = aff_range(rest, extents);
-                if (rest_range.lo >= 0 && rest_range.hi < c) return aff_floordiv(even, c, extents);
-            }
-        }
     }
+
+    // Drop the addends that cannot carry into the quotient and divide the rest through.
+    // This is what makes a delinearize-of-linearize round trip collapse back to the plain loop dims.
+    auto sp = split_by(a, c, extents);
+    if (!sp.even.empty() && !sp.rest_carries) {
+        std::vector<AffineExprRef> scaled;
+        for (auto& t : sp.even)
+            scaled.push_back(exact_div(t, c));
+        return sum_of(scaled);
+    }
+
+    // `(g·Q + L) floordiv (g·k) → Q floordiv k` when `0 ≤ L < g`. The test above asks whether the *whole*
+    // remainder carries, which a grouped index always overflows — its channel term alone exceeds the divisor —
+    // leaving the low axes textually inside a `floordiv` they cannot reach. Cancelling the common stride `g`
+    // drops them, which is what restores provable contiguity for the innermost dim.
+    for (auto g : [&] {
+             std::vector<int64_t> out;
+             for (auto& t : sp.rest)
+                 if (auto k = term_stride(*t); k > 1 && c % k == 0 && std::ranges::find(out, k) == out.end())
+                     out.push_back(k);
+             std::ranges::sort(out, std::greater{});
+             return out;
+         }()) {
+        std::vector<AffineExprRef> hi, low;
+        for (auto& t : sp.rest)
+            (divides(*t, g) ? hi : low).push_back(t);
+        if (hi.empty()) continue;
+
+        auto lr = aff_range(sum_of(low), extents);
+        if (lr.lo < 0 || lr.hi >= g) continue;
+
+        std::vector<AffineExprRef> quot;
+        for (auto& t : hi)
+            quot.push_back(exact_div(t, g));
+
+        std::vector<AffineExprRef> parts;
+        for (auto& t : sp.even)
+            parts.push_back(exact_div(t, c));
+        parts.push_back(aff_floordiv(sum_of(quot), c / g, extents));
+        return sum_of(parts);
+    }
+
     return bin(AffineBinOp::FloorDiv, std::move(a), aff_const(c));
 }
 
@@ -222,14 +320,13 @@ AffineExprRef aff_mod(AffineExprRef a, int64_t c, const AffineExtents& extents) 
     // An even multiple of the modulus always leaves remainder 0.
     if (divides(*a, c)) return aff_const(0);
 
-    if (auto b = std::get_if<AffineBin>(&a->expr); b && b->op == AffineBinOp::Add) {
-        // Drop whichever addend is a multiple of `c`: `(x * c + y) mod c → y mod c`.
-        for (auto [even, rest] : {
-                 std::pair{b->lhs, b->rhs},
-                 std::pair{b->rhs, b->lhs}
-        })
-            if (divides(*even, c)) return aff_mod(rest, c, extents);
+    // Drop every addend that is a multiple of `c`: `(x * c + y) mod c → y mod c`.
+    if (auto sp = split_by(a, c, extents); !sp.even.empty()) {
+        auto residue = sum_of(sp.rest);
+        if (!sp.rest_carries) return residue;
+        return bin(AffineBinOp::Mod, std::move(residue), aff_const(c));
     }
+
     return bin(AffineBinOp::Mod, std::move(a), aff_const(c));
 }
 
@@ -327,7 +424,7 @@ AffineExprRef affine_expr(const Def* def, const std::vector<const Def*>& params,
             case plug::affine::semiop::mul: return aff_mul(a, k);
             case plug::affine::semiop::floordiv: return aff_floordiv(a, k, extents);
             case plug::affine::semiop::ceildiv: return aff_ceildiv(a, k, extents);
-            case plug::affine::semiop::mod: return aff_mod(a, k, extents);
+            case plug::affine::semiop::rem: return aff_mod(a, k, extents);
             default: return {};
         }
     }

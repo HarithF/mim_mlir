@@ -10,23 +10,23 @@
 plugin compile;
 plugin tensor;
 
-axm %mlir.emit: %compile.Phase;
+axm emit: compile.Phase;
 
-lam extern _compile (): %compile.Phase =
-    %compile.phases ff (
-      let optimize =
-        %compile.phases tt (
-            %compile.scalarize,
-            %compile.phases tt (
-                %compile.beta_red,
-                %compile.eta_conv,
+extern lam _compile (): compile.Phase =
+    let optimize =
+        compile.phases tt (
+            compile.scalarize,
+            compile.phases tt (
+                compile.beta_red,
+                compile.eta_conv,
             ),
-            %compile.named "%mem.seo",
-            %compile.static_arg_opt,
+            compile.named "mem.seo",
+            compile.static_arg_opt,
         );
-
+    compile.phases ff (
         optimize,
-        %tensor.lower_tensor,
-        %tensor.fuse_tensor,
-        %mlir.emit,
+        //compile.named "tensor.reassoc",
+        tensor.lower_tensor,
+        tensor.fuse_tensor,
+        emit,
     );
