@@ -5,7 +5,7 @@
 #include <set>
 #include <string>
 
-#include <absl/container/flat_hash_set.h>
+#include <ankerl/unordered_dense.h>
 
 #include <mim/def.h>
 #include <mim/lam.h>
@@ -94,7 +94,7 @@ private:
 
     DefMap<MLIRValue> values_;
     DefMap<std::string> names_;
-    absl::flat_hash_set<std::string> used_names_;
+    ankerl::unordered_dense::set<std::string> used_names_;
 
     const Def* curr_ret_var_ = nullptr;
     int name_counter_        = 0;
