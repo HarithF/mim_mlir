@@ -1,0 +1,19 @@
+// RUN: rm -rf %t && mkdir -p %t && cd %t && %mim -p mlir %s && %FileCheck %s < %{s:stem}.mlir
+
+// A global pool keeps its trailing 1x1 axes, while the flatten after it is the identity on the Mim type,
+// so the classifier's matmul has to collapse them away again.
+
+plugin tensor;
+plugin math;
+
+let f32 = math.f32;
+let F32 = math.F32;
+let R: tensor.Ring = (F32, 0:F32, math.arith.add 0 @f32, math.arith.mul 0 @f32);
+
+extern fun pool_fc (x: «2, 8, 4, 4; F32», w: «8, 3; F32»): «2, 3; F32» =
+    let p = tensor.pool (math.arith.add 0 @f32, 0:F32) ((4, 4), (1, 1), (1, 1), (0, 0), (1, 1)) (tensor.buf x);
+    return (tensor.product_2d R (tensor.reshape (2, 8, 1, 1) (2, 8) p, tensor.buf w));
+
+// CHECK: tensor.collapse_shape %{{.*}} {{\[}}[0], [1, 2, 3]] : tensor<2x8x1x1xf32> into tensor<2x8xf32>
+// CHECK: linalg.generic
+// CHECK: func.return {{.*}} : tensor<2x3xf32>
