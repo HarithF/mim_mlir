@@ -12,8 +12,6 @@
 namespace mim::mlir_be {
 
 const Def* LamClassifier::rewrite_imm_App(const App* app) {
-    if (is_bootstrapping()) return Analysis::rewrite_imm_App(app);
-
     // %affine.For
     //
     if (auto for_ax = Axm::isa<plug::affine::For>(app)) {
@@ -38,8 +36,6 @@ const Def* LamClassifier::rewrite_imm_App(const App* app) {
 }
 
 const Def* LamClassifier::rewrite_mut_Lam(Lam* lam) {
-    if (is_bootstrapping()) return Analysis::rewrite_mut_Lam(lam);
-
     if (!results_.contains(lam)) {
         if (is_ignored(lam))
             results_[lam] = LamKind::Ignored;

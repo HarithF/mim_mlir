@@ -9,6 +9,8 @@
 The **mlir** plugin emits [MLIR](https://mlir.llvm.org/) from a partially optimized **MimIR** world instead of going through MimIR's LLVM backend (`ll`).
 It lowers tensor operations and `affine.For` loops into the `func`, `arith`, `math`, `scf`, `linalg`, and `tensor` dialects, so MimIR programs can continue through the MLIR ecosystem.
 
+Last tested against MimIR [`664efee`](https://github.com/mimir/mimir/commit/664efee6244f8b8c2d9aed275a3c33b9fe06fbd9) (2026-10-15).
+
 ## Usage
 
 ```bash
